@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+.venv
+*.db
+*.sqlite
+.env
+.git
+.gitignore
+.vscode
+.idea
+tests/
+mosquitto/data
+mosquitto/log

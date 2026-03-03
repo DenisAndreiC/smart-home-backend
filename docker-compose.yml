@@ -1,0 +1,27 @@
+services:
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"   # MQTT
+      - "9001:9001"   # WebSocket
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    restart: unless-stopped
+
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mosquitto
+    environment:
+      # Override MQTT_BROKER pentru rețeaua internă Docker
+      # (serviciile comunică prin numele serviciului, nu localhost)
+      MQTT_BROKER: mosquitto
+    volumes:
+      # Persistăm baza de date SQLite în afara containerului
+      - ./smart_home.db:/app/smart_home.db
+    restart: unless-stopped
