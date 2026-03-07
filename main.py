@@ -18,28 +18,44 @@ from services.mqtt_service import mqtt_service
 from services.scheduler_service import scheduler_service
 from utils.middleware import ActivityMiddleware
 
+# Logger dedicat acestui modul
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Pornire aplicație ---
+    """
+    Context manager pentru ciclul de viata al aplicatiei FastAPI.
+    Bloc inainte de yield: startup (creare tabele, conectare MQTT, pornire scheduler).
+    Bloc dupa yield: shutdown (oprire scheduler, deconectare MQTT).
+    """
+    # --- Pornire aplicatie ---
+
+    # Creeaza toate tabelele in baza de date daca nu exista deja
     Base.metadata.create_all(bind=engine)
 
+    # Conectare la brokerul MQTT; eroarea e prinsa pentru a nu bloca startupul
     try:
         mqtt_service.connect()
     except Exception as e:
         logger.warning("MQTT indisponibil la startup: %s", e)
 
+    # Porneste scheduler-ul APScheduler pentru rutinele automate
     scheduler_service.start()
 
+    # Cedeaza controlul catre aplicatie
     yield
 
-    # --- Oprire aplicație ---
+    # --- Oprire aplicatie ---
+
+    # Opreste scheduler-ul graceful (fara sa astepte job-urile in curs)
     scheduler_service.stop()
+
+    # Deconecteaza clientul MQTT
     mqtt_service.disconnect()
 
 
+# Instantierea aplicatiei FastAPI cu metadate pentru Swagger UI
 app = FastAPI(
     title="Smart Home API",
     version="1.0.0",
@@ -48,18 +64,20 @@ app = FastAPI(
 )
 
 # Middleware CORS permisiv pentru development
+# In productie, allow_origins trebuie restrictionat la domeniul aplicatiei
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],        # Permite orice origine
+    allow_credentials=True,     # Permite cookies/authorization headers
+    allow_methods=["*"],        # Permite toate metodele HTTP
+    allow_headers=["*"],        # Permite orice header
 )
 
-# Middleware de activity logging (adăugat după CORS)
+# Middleware de activity logging (adaugat dupa CORS)
+# Inregistreaza in DB toate operatiile POST/PUT/DELETE/PATCH
 app.add_middleware(ActivityMiddleware)
 
-# Înregistrare routere cu prefixul /api
+# Inregistrare routere cu prefixul /api
 app.include_router(auth_router, prefix="/api")
 app.include_router(devices_router, prefix="/api")
 app.include_router(commands_router, prefix="/api")
@@ -72,9 +90,11 @@ app.include_router(notifications_router, prefix="/api")
 
 @app.get("/")
 def root():
-    """Endpoint de verificare a stării serviciului."""
+    """Endpoint de verificare a starii serviciului (health check)."""
+    # Returneaza un JSON simplu cu statusul si numele serviciului
     return {"status": "online", "service": "Smart Home API"}
 
 
 if __name__ == "__main__":
+    # Pornire directa cu uvicorn in modul reload pentru development
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
