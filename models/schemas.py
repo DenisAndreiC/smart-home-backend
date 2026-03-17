@@ -71,6 +71,12 @@ class UserResponse(BaseModel):
     # Numele de afisare
     username: str
 
+    # Numele de afisare optional (poate diferi de username)
+    display_name: Optional[str] = None
+
+    # URL-ul avatarului utilizatorului
+    avatar_url: Optional[str] = None
+
     # Momentul crearii contului, setat automat de ORM
     created_at: datetime
 
@@ -78,6 +84,15 @@ class UserResponse(BaseModel):
     # dintr-un obiect SQLAlchemy ORM (adica din randul din baza de date),
     # nu doar dintr-un dict — necesar pentru response_model in FastAPI
     model_config = ConfigDict(from_attributes=True)
+
+
+# Schema folosita la PUT /api/users/me — actualizare profil
+class UserUpdate(BaseModel):
+    # Noul username — None inseamna fara modificare
+    username: Optional[str] = None
+
+    # Noul display_name — None inseamna fara modificare
+    display_name: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

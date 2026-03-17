@@ -1,9 +1,12 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from database.db import Base, engine
 from routers.auth import router as auth_router
@@ -14,6 +17,8 @@ from routers.notifications import router as notifications_router
 from routers.rooms import router as rooms_router
 from routers.routines import router as routines_router
 from routers.scenes import router as scenes_router
+from routers.stats import router as stats_router
+from routers.users import router as users_router
 from services.mqtt_service import mqtt_service
 from services.scheduler_service import scheduler_service
 from utils.middleware import ActivityMiddleware
@@ -33,6 +38,19 @@ async def lifespan(app: FastAPI):
 
     # Creeaza toate tabelele in baza de date daca nu exista deja
     Base.metadata.create_all(bind=engine)
+
+    # Migrare simpla: adauga coloanele noi la tabelele existente daca lipsesc
+    # SQLite nu suporta IF NOT EXISTS pe ALTER TABLE, deci folosim try/except
+    with engine.connect() as conn:
+        for ddl in [
+            "ALTER TABLE users ADD COLUMN display_name VARCHAR(100)",
+            "ALTER TABLE users ADD COLUMN avatar_url VARCHAR(500)",
+        ]:
+            try:
+                conn.execute(text(ddl))
+                conn.commit()
+            except Exception:
+                pass  # Coloana exista deja
 
     # Conectare la brokerul MQTT; eroarea e prinsa pentru a nu bloca startupul
     try:
@@ -77,6 +95,10 @@ app.add_middleware(
 # Inregistreaza in DB toate operatiile POST/PUT/DELETE/PATCH
 app.add_middleware(ActivityMiddleware)
 
+# Servim fisierele statice (avatare etc.)
+os.makedirs("static/avatars", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # Inregistrare routere cu prefixul /api
 app.include_router(auth_router, prefix="/api")
 app.include_router(devices_router, prefix="/api")
@@ -86,6 +108,8 @@ app.include_router(rooms_router, prefix="/api")
 app.include_router(scenes_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
+app.include_router(stats_router, prefix="/api")
+app.include_router(users_router, prefix="/api")
 
 
 @app.get("/")

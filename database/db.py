@@ -104,6 +104,12 @@ class User(Base):
     # Timestamp-ul crearii contului — setat automat la momentul inregistrarii (UTC)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # Numele de afisare optional (poate diferi de username)
+    display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Calea catre avatarul utilizatorului (relativa la /static/avatars/)
+    avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # Relatie one-to-many catre Device: un utilizator poate detine mai multe dispozitive.
     # back_populates="owner" leaga relatia cu campul 'owner' din clasa Device.
     # Fara cascade — stergerea utilizatorului NU sterge automat dispozitivele sale.

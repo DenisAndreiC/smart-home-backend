@@ -262,22 +262,34 @@ async def execute_scene(
     actions = sorted(scene.actions, key=lambda a: a.exec_order)
 
     # Iteram fiecare actiune si o executam in ordine
-    for act in actions:
+    for i, act in enumerate(actions):
         # --- Pasul 1: Asteptam delay-ul inainte de executie (non-blocking) ---
-        # asyncio.sleep nu blocheaza event loop-ul — alte request-uri pot rula in paralel
+        # delay_seconds din scena + 0.5s intre comenzi consecutive
         if act.delay_seconds > 0:
-            await asyncio.sleep(act.delay_seconds)  # delay in secunde intre actiuni
+            await asyncio.sleep(act.delay_seconds)
+        elif i > 0:
+            # 0.5s intre comenzi consecutive pentru a nu satura ESP32-ul
+            await asyncio.sleep(0.5)
 
         # Obtinem dispozitivul tinta al actiunii din relatia ORM
         device = act.device
 
-        # --- Pasul 2: Trimitem comanda catre dispozitiv ---
+        # --- Pasul 2: Trimitem comanda catre dispozitiv prin canalul corespunzator ---
         if device.device_type == "wol":
             # Dispozitiv WoL: trimitem magic packet prin UDP (nu MQTT)
             wake_device(device.mac_address)
+        elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
+            # Dispozitive IR — trimitem pe topic-ul ESP32 IR Controller
+            mqtt_service.publish_ir_command(device.name, device.device_type, act.action, act.value)
+        elif device.device_type == "relay":
+            # Dispozitive Relay — trimitem pe topic-ul specific relay-ului
+            mqtt_service.publish_relay_command(device.mqtt_topic, act.action, act.value)
         else:
-            # Dispozitiv standard: trimitem comanda prin broker MQTT
+            # Fallback pentru tipuri necunoscute
             mqtt_service.publish_command(device.mqtt_topic, act.action, act.value)
+
+        # Actualizam last_status al dispozitivului cu valoarea trimisa
+        device.last_status = act.value
 
         # --- Pasul 3: Salvam comanda in istoricul ML cu source='scene' ---
         # source='scene' permite filtrarea comenzilor automate vs manuale in analiza ML
