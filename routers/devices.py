@@ -3,9 +3,10 @@
 # Toate operatiile sunt protejate — necesita autentificare JWT.
 # Fiecare utilizator poate accesa si modifica doar propriile dispozitive.
 
-import asyncio  # pentru asyncio.sleep in endpoint-urile bulk
-import json  # Folosit pentru serializarea/deserializarea codurilor IR (dict <-> string JSON)
-from typing import List, Optional  # Tipuri pentru anotarile de tip ale parametrilor
+import asyncio   # asyncio.sleep for non-blocking delay between bulk commands
+import json      # JSON serialisation/deserialisation of IR codes stored as Text in DB
+import logging   # structured logging for bulk-command debug output
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -35,10 +36,15 @@ from utils.helpers import validate_mac_address
 # Importam serviciul MQTT pentru comenzile bulk (all-off, away-mode)
 from services.mqtt_service import mqtt_service
 
-# Importam notificarile pentru comenzile bulk
+# Notification helper — creates in-app notification records for each bulk command
 from services.notification_service import notify_device_command
 
-# Instantiem router-ul cu prefixul /devices si tag-ul pentru gruparea in Swagger UI
+# Module-level logger — visible in Docker logs via `docker-compose logs backend`
+logger = logging.getLogger(__name__)
+
+# Router prefix /devices — all routes resolve to /api/devices/...
+# IMPORTANT: static routes (/all-off, /away-mode, /supported-actions) are defined
+# BEFORE the parameterised route (/{device_id}) so FastAPI matches them first.
 router = APIRouter(prefix="/devices", tags=["Dispozitive"])
 
 
@@ -187,131 +193,136 @@ def get_supported_actions():
 
 @router.post("/all-off")
 async def all_off(
-    db: Session = Depends(get_db),                  # sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user), # utilizatorul autentificat din token JWT
+    db: Session = Depends(get_db),                  # SQLAlchemy session injected by FastAPI
+    current_user: User = Depends(get_current_user), # authenticated user injected from JWT
 ):
     """
-    Trimite comanda power OFF tuturor dispozitivelor controlabile ale utilizatorului.
+    Send a power-OFF command to every controllable device owned by the current user.
 
-    Itereaza secvential toate dispozitivele userului si trimite power OFF
-    prin canalul corespunzator tipului (IR sau relay).
-    Dispozitivele de tip 'wol' sunt sarite — nu pot fi oprite prin magic packet.
-    Delay de 0.3s intre comenzi consecutive pentru a nu satura ESP32-ul.
-    Fiecare comanda este inregistrata in DB si genereaza o notificare.
+    Iterates devices sequentially and dispatches the correct MQTT call per device type.
+    WoL devices are skipped — there is no standard way to power them off remotely.
+    A 0.3 s delay is inserted between consecutive commands to avoid flooding the ESP32.
+    Each command is recorded in the commands table and triggers an in-app notification.
 
-    Parametri:
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
+    Args:
+        db:           SQLAlchemy session (shared with get_current_user via FastAPI cache).
+        current_user: ORM User object injected from the JWT token.
 
-    Returneaza:
-        Dict {"status": "ok", "devices_turned_off": int} cu numarul de dispozitive oprite
+    Returns:
+        {"status": "ok", "devices_turned_off": <count>}
     """
-    # Preluam toate dispozitivele apartinand utilizatorului curent
+    # Fetch all devices belonging to the current user
     devices = db.query(Device).filter(Device.owner_id == current_user.id).all()
-    count = 0  # numarul de dispozitive carora li s-a trimis comanda de oprire
+    count = 0  # number of devices that actually received a power-OFF command
 
-    # Iteram fiecare dispozitiv si trimitem comanda power OFF
+    logger.info("all-off triggered by user_id=%d for %d device(s)", current_user.id, len(devices))
+
     for i, device in enumerate(devices):
-        # Asteptam 0.3s incepand cu al doilea dispozitiv pentru a evita supraaglomerarea ESP32
+        # Wait 0.3 s before each command after the first to avoid flooding the ESP32
         if i > 0:
-            await asyncio.sleep(0.3)  # delay non-blocking intre comenzi consecutive
+            await asyncio.sleep(0.3)  # non-blocking delay between commands
 
-        # Trimitem comanda power OFF prin canalul corespunzator tipului de dispozitiv
+        # Dispatch through the channel matching the device type
         if device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
-            # Dispozitive IR — trimitem pe topic-ul ESP32 IR Controller
+            # IR devices: publish to smarthome/devices/ir/command via ESP32 IR Controller
+            logger.info(
+                "all-off IR -> device='%s' type=%s", device.name, device.device_type
+            )
             mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off")
+
         elif device.device_type == "relay":
-            # Dispozitive relay — trimitem pe topic-ul specific al releului
+            # Relay devices: publish to the device-specific MQTT topic
+            logger.info("all-off relay -> topic='%s' device='%s'", device.mqtt_topic, device.name)
             mqtt_service.publish_relay_command(device.mqtt_topic, "power", "off")
+
         else:
-            # wol si alte tipuri necunoscute nu pot fi oprite remote — sarim
+            # wol and unknown types cannot be powered off remotely — skip
+            logger.debug("all-off skipping device='%s' type=%s", device.name, device.device_type)
             continue
 
-        # Actualizam last_status al dispozitivului in obiectul ORM (va fi persistat la commit)
+        # Update the cached status on the ORM object (persisted in the commit below)
         device.last_status = "off"
 
-        # Inregistram comanda in tabelul commands — critic pentru modulul ML
+        # Record the command in the commands table — used by the ML routine detector
         cmd = Command(
-            device_id=device.id,       # dispozitivul care a primit comanda
-            user_id=current_user.id,   # utilizatorul care a initiat all-off
-            action="power",            # actiunea executata
-            value="off",               # valoarea trimisa
-            source="app",              # sursa: initiata manual din aplicatie
+            device_id=device.id,
+            user_id=current_user.id,
+            action="power",
+            value="off",
+            source="app",  # manually initiated from the application
         )
-        db.add(cmd)  # adaugam comanda in sesiune (commit la final)
+        db.add(cmd)
 
-        # Cream notificare pentru utilizator despre oprirea acestui dispozitiv
+        # Create an in-app notification so the user sees the action in the notifications list
         notify_device_command(db, current_user.id, device.name, "power", "off")
 
-        count += 1  # incrementam contorul de dispozitive oprite cu succes
+        count += 1
 
-    # Comitem toate comenzile, actualizarile last_status si notificarile intr-o singura tranzactie
+    # Single commit for all commands, last_status updates and notifications
     db.commit()
 
-    # Returnam confirmarea cu numarul de dispozitive oprite
+    logger.info("all-off done: %d device(s) turned off", count)
     return {"status": "ok", "devices_turned_off": count}
 
 
 @router.post("/away-mode")
 async def away_mode(
-    db: Session = Depends(get_db),                  # sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user), # utilizatorul autentificat din token JWT
+    db: Session = Depends(get_db),                  # SQLAlchemy session injected by FastAPI
+    current_user: User = Depends(get_current_user), # authenticated user injected from JWT
 ):
     """
-    Activeaza modul Away — pregateste locuinta pentru plecare.
+    Activate Away Mode — prepares the home for the user leaving.
 
-    Comportament per tip de dispozitiv:
-      - ir_rgb : trimite culoarea ROSIE ca semnal vizual de alarma activa
-      - ir_tv  : trimite power OFF
-      - ir_ac  : trimite power OFF
-      - relay  : trimite power OFF
-      - wol    : ignorat (nu poate fi oprit remote)
+    Per device type behaviour:
+      - ir_rgb : send color RED as a visible alarm indicator
+      - ir_tv  : send power OFF
+      - ir_ac  : send power OFF
+      - relay  : send power OFF
+      - wol    : skipped (cannot be powered off remotely)
 
-    Delay de 0.3s intre comenzi consecutive pentru a nu satura ESP32-ul.
-    Fiecare comanda este inregistrata in DB si genereaza o notificare.
+    A 0.3 s delay is inserted between processed devices to avoid flooding the ESP32.
+    Each command is recorded in the commands table and triggers an in-app notification.
 
-    Parametri:
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
+    Args:
+        db:           SQLAlchemy session (shared with get_current_user via FastAPI cache).
+        current_user: ORM User object injected from the JWT token.
 
-    Returneaza:
-        Dict {"status": "ok", "rgb_count": int, "off_count": int}
+    Returns:
+        {"status": "ok", "rgb_count": <x>, "off_count": <y>}
     """
-    # Preluam toate dispozitivele apartinand utilizatorului curent
     devices = db.query(Device).filter(Device.owner_id == current_user.id).all()
-    rgb_count = 0   # numarul de becuri RGB care au primit culoarea rosie
-    off_count = 0   # numarul de dispozitive care au primit power OFF
-    processed = 0   # contor pentru dispozitivele efectiv procesate (pentru delay)
+    rgb_count = 0   # RGB bulbs that received the red-alert colour command
+    off_count = 0   # devices that received a power-OFF command
+    processed = 0   # counter of devices actually processed (used to gate the sleep)
 
-    # Iteram fiecare dispozitiv si trimitem comanda corespunzatoare tipului sau
+    logger.info("away-mode triggered by user_id=%d for %d device(s)", current_user.id, len(devices))
+
     for device in devices:
-        # Asteptam 0.3s incepand cu al doilea dispozitiv procesat pentru a evita supraaglomerarea
+        # Insert a 0.3 s gap before every device after the first one
         if processed > 0:
-            await asyncio.sleep(0.3)  # delay non-blocking intre comenzi consecutive
+            await asyncio.sleep(0.3)
 
         if device.device_type == "ir_rgb":
-            # Becuri RGB — trimitem culoarea rosie ca indicator vizual de alarma activa
+            # RGB bulb: set colour to RED as a visual alarm indicator
+            logger.info("away-mode RGB red -> device='%s'", device.name)
             mqtt_service.publish_ir_command(device.name, device.device_type, "color", "red")
-            device.last_status = "red"  # actualizam starea cunoscuta a becului
-
-            # Inregistram comanda de culoare in istoricul ML
+            device.last_status = "red"
             cmd = Command(
                 device_id=device.id,
                 user_id=current_user.id,
-                action="color",   # actiunea de schimbare culoare
-                value="red",      # culoarea rosie pentru alarma
+                action="color",
+                value="red",
                 source="app",
             )
             db.add(cmd)
             notify_device_command(db, current_user.id, device.name, "color", "red")
-            rgb_count += 1  # incrementam contorul de becuri RGB procesate
+            rgb_count += 1
 
         elif device.device_type in ("ir_tv", "ir_ac"):
-            # Televizoare si aparate de aer conditionat IR — trimitem power OFF
+            # IR TV or AC: power off via the ESP32 IR Controller
+            logger.info("away-mode IR off -> device='%s' type=%s", device.name, device.device_type)
             mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off")
             device.last_status = "off"
-
-            # Inregistram comanda de oprire in istoricul ML
             cmd = Command(
                 device_id=device.id,
                 user_id=current_user.id,
@@ -321,14 +332,13 @@ async def away_mode(
             )
             db.add(cmd)
             notify_device_command(db, current_user.id, device.name, "power", "off")
-            off_count += 1  # incrementam contorul de dispozitive oprite
+            off_count += 1
 
         elif device.device_type == "relay":
-            # Prize si intrerupatoare relay — trimitem power OFF pe topic-ul specific
+            # Relay smart plug/switch: power off via the device-specific topic
+            logger.info("away-mode relay off -> topic='%s' device='%s'", device.mqtt_topic, device.name)
             mqtt_service.publish_relay_command(device.mqtt_topic, "power", "off")
             device.last_status = "off"
-
-            # Inregistram comanda de oprire in istoricul ML
             cmd = Command(
                 device_id=device.id,
                 user_id=current_user.id,
@@ -338,18 +348,19 @@ async def away_mode(
             )
             db.add(cmd)
             notify_device_command(db, current_user.id, device.name, "power", "off")
-            off_count += 1  # incrementam contorul de dispozitive oprite
+            off_count += 1
 
         else:
-            # wol si alte tipuri necunoscute — sarim fara a incrementa processed
+            # wol and unknown types: skip without incrementing processed
+            logger.debug("away-mode skipping device='%s' type=%s", device.name, device.device_type)
             continue
 
-        processed += 1  # incrementam doar pentru dispozitivele efectiv procesate (pentru delay)
+        processed += 1  # only incremented for devices that were actually processed
 
-    # Comitem toate comenzile, actualizarile last_status si notificarile intr-o singura tranzactie
+    # Single commit for all commands, last_status updates and notifications
     db.commit()
 
-    # Returnam confirmarea cu numarul de dispozitive procesate per categorie
+    logger.info("away-mode done: rgb=%d off=%d", rgb_count, off_count)
     return {"status": "ok", "rgb_count": rgb_count, "off_count": off_count}
 
 

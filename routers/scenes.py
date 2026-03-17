@@ -8,8 +8,9 @@ Toate endpoint-urile necesita autentificare JWT prin dependency-ul get_current_u
 Prefixul /scenes este inregistrat cu /api in main.py -> URL final: /api/scenes/...
 """
 
-import asyncio          # asyncio pentru await asyncio.sleep (delay non-blocking intre actiuni)
-from typing import List  # List pentru adnotarile de tip din response_model
+import asyncio          # asyncio.sleep for non-blocking delay between actions
+import logging          # structured logging for MQTT debug output
+from typing import List  # List type hint used in response_model annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status  # componente FastAPI
 from sqlalchemy.orm import Session                              # tipul sesiunii SQLAlchemy
@@ -32,7 +33,10 @@ from services.notification_service import notify_scene_executed
 # Functia Wake-on-LAN pentru dispozitivele de tip wol
 from services.wol_service import wake_device
 
-# Router cu prefix /scenes — toate rutele devin /api/scenes/...
+# Module-level logger — output visible in Docker logs via `docker-compose logs backend`
+logger = logging.getLogger(__name__)
+
+# Router with prefix /scenes — all routes resolve to /api/scenes/...
 router = APIRouter(prefix="/scenes", tags=["Scene"])
 
 
@@ -261,66 +265,82 @@ async def execute_scene(
     # Sortam actiunile dupa exec_order pentru a le executa in ordinea corecta
     actions = sorted(scene.actions, key=lambda a: a.exec_order)
 
-    # Iteram fiecare actiune si o executam in ordine
-    for i, act in enumerate(actions):
-        # --- Pasul 1: Asteptam delay-ul inainte de executie (non-blocking) ---
-        # delay_seconds din scena + 0.5s intre comenzi consecutive
-        if act.delay_seconds > 0:
-            await asyncio.sleep(act.delay_seconds)
-        elif i > 0:
-            # 0.5s intre comenzi consecutive pentru a nu satura ESP32-ul
-            await asyncio.sleep(0.5)
+    logger.info("Executing scene '%s' (id=%d) with %d actions", scene.name, scene_id, len(actions))
 
-        # Obtinem dispozitivul tinta al actiunii din relatia ORM
+    # Iterate each action and execute it in sorted order
+    for i, act in enumerate(actions):
+        # --- Step 1: wait for the configured delay or the default 0.5 s inter-command gap ---
+        # asyncio.sleep is non-blocking — other requests continue while waiting
+        if act.delay_seconds > 0:
+            await asyncio.sleep(act.delay_seconds)  # honour the per-action delay from the scene
+        elif i > 0:
+            await asyncio.sleep(0.5)  # 0.5 s gap between consecutive commands to avoid flooding ESP32
+
+        # Retrieve the target device via the ORM relation already loaded on SceneAction
         device = act.device
 
-        # --- Pasul 2: Trimitem comanda catre dispozitiv prin canalul corespunzator ---
+        # --- Step 2: dispatch the command through the correct channel for this device type ---
         if device.device_type == "wol":
-            # Dispozitiv WoL: trimitem magic packet prin UDP (nu MQTT)
+            # WoL device: send UDP magic packet, not an MQTT message
+            logger.info("WoL packet -> device='%s'", device.name)
             wake_device(device.mac_address)
+
         elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
-            # Dispozitive IR — trimitem pe topic-ul ESP32 IR Controller
+            # IR device: publish to smarthome/devices/ir/command via ESP32 IR Controller
+            # Payload format: {"device": "tv"/"ac"/"bulb", "command": "<action>"}
+            logger.info(
+                "MQTT IR -> topic=smarthome/devices/ir/command device='%s' type=%s action=%s value=%s",
+                device.name, device.device_type, act.action, act.value,
+            )
             mqtt_service.publish_ir_command(device.name, device.device_type, act.action, act.value)
+
         elif device.device_type == "relay":
-            # Dispozitive Relay — trimitem pe topic-ul specific relay-ului
+            # Relay device: publish to the device-specific MQTT topic
+            logger.info(
+                "MQTT relay -> topic='%s' action=%s value=%s",
+                device.mqtt_topic, act.action, act.value,
+            )
             mqtt_service.publish_relay_command(device.mqtt_topic, act.action, act.value)
+
         else:
-            # Fallback pentru tipuri necunoscute
+            # Fallback for unknown/future device types
+            logger.info(
+                "MQTT generic -> topic='%s' action=%s value=%s",
+                device.mqtt_topic, act.action, act.value,
+            )
             mqtt_service.publish_command(device.mqtt_topic, act.action, act.value)
 
-        # Actualizam last_status al dispozitivului cu valoarea trimisa
+        # Update the device's last known status with the value just sent
         device.last_status = act.value
 
-        # --- Pasul 3: Salvam comanda in istoricul ML cu source='scene' ---
-        # source='scene' permite filtrarea comenzilor automate vs manuale in analiza ML
+        # --- Step 3: persist the command in the ML history table with source='scene' ---
+        # source='scene' lets the ML pipeline distinguish automated from manual commands
         cmd = Command(
-            device_id=device.id,        # ID-ul dispozitivului tinta
-            user_id=current_user.id,    # ID-ul utilizatorului care a executat scena
-            action=act.action,          # tipul actiunii executate
-            value=act.value,            # valoarea actiunii executate
-            source="scene",             # sursa: 'scene' (nu 'app' sau 'routine')
+            device_id=device.id,     # target device id
+            user_id=current_user.id, # user who triggered the scene
+            action=act.action,       # action type (e.g. "power", "color")
+            value=act.value,         # action value (e.g. "on", "red")
+            source="scene",          # origin marker for ML filtering
         )
-        db.add(cmd)  # adaugam comanda in sesiune (commit la final)
+        db.add(cmd)  # will be committed in a single transaction at the end
 
-        # --- Pasul 4: Logam executia in ActivityLog ---
+        # --- Step 4: append an activity log entry for audit purposes ---
         log = ActivityLog(
-            user_id=current_user.id,        # utilizatorul care a declansat executia
-            action="scene.execute",         # tipul actiunii din jurnal
-            entity_type="scene",            # tipul entitatii afectate
-            entity_id=scene_id,             # ID-ul scenei executate
-            # Detalii JSON cu actiunea, dispozitivul si scena (pentru audit)
+            user_id=current_user.id,
+            action="scene.execute",
+            entity_type="scene",
+            entity_id=scene_id,
             details=f'{{"action": "{act.action}", "device": "{device.name}", "scene": "{scene.name}"}}',
         )
-        db.add(log)  # adaugam log-ul in sesiune
+        db.add(log)
 
-    # --- Pasul 5: Notificam utilizatorul despre executia scenei ---
-    # Notificarea include numele scenei si numarul de actiuni executate
+    # --- Step 5: create a single in-app notification summarising the scene execution ---
     notify_scene_executed(db, current_user.id, scene.name, len(actions))
 
-    # Comitem toate comenzile, log-urile si notificarea intr-o singura tranzactie
+    # Commit all commands, last_status updates, log entries and the notification in one transaction
     db.commit()
 
-    # Returnam confirmarea cu numele scenei si numarul de actiuni executate
+    logger.info("Scene '%s' executed successfully (%d actions)", scene.name, len(actions))
     return {"message": f"Scena '{scene.name}' executata", "actions_count": len(actions)}
 
 

@@ -108,10 +108,15 @@ def send_command(
     # Trimitem comanda prin canalul corespunzator tipului de dispozitiv
     if device.device_type == "wol":
         # Dispozitivele WoL (ex: PC-uri) primesc un magic packet UDP prin retea locala
-        wake_device(device.mac_address)  # Trimitem magic packet la adresa MAC a dispozitivului
+        wake_device(device.mac_address)
+    elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
+        # Dispozitive IR — trimitem pe topic-ul ESP32 IR Controller
+        mqtt_service.publish_ir_command(device.name, device.device_type, date.action, date.value)
+    elif device.device_type == "relay":
+        # Dispozitive Relay — trimitem pe topic-ul specific relay-ului
+        mqtt_service.publish_relay_command(device.mqtt_topic, date.action, date.value)
     else:
-        # Dispozitivele MQTT (ex: relay-uri, termostate IR) primesc comanda prin broker MQTT
-        # Publicam actiunea si valoarea pe topic-ul MQTT al dispozitivului
+        # Fallback — folosim metoda veche pentru tipuri necunoscute
         mqtt_service.publish_command(device.mqtt_topic, date.action, date.value)
 
     # Inregistram comanda in baza de date — CRITIC pentru modulul ML de detectie rutine
@@ -275,3 +280,22 @@ def wake_on_lan(
         "message": "Magic packet trimis",         # Confirmare ca pachetul a fost trimis cu succes
         "mac_address": device.mac_address,         # Adresa MAC la care s-a trimis magic packet-ul
     }
+
+
+@router.post("/set-brand")
+def set_tv_brand(
+    brand: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Schimba brand-ul TV pe ESP32 IR Controller.
+    Branduri suportate: philips, samsung, lg, sony, panasonic, nec
+    """
+    valid_brands = ["philips", "samsung", "lg", "sony", "panasonic", "nec"]
+    if brand.lower() not in valid_brands:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Brand invalid. Branduri suportate: {', '.join(valid_brands)}",
+        )
+    mqtt_service.publish_brand_config(brand)
+    return {"message": f"Brand TV schimbat la {brand}", "brand": brand}

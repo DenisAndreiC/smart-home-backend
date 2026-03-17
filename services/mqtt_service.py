@@ -44,6 +44,11 @@ class MQTTService:
         self.client.subscribe("home/+/+/status", qos=1)
         logger.info("Subscris la home/+/+/status")
 
+        # Subscriptii pentru statusul ESP32 IR si Relay Controller
+        self.client.subscribe("smarthome/devices/ir/status", qos=1)
+        self.client.subscribe("smarthome/devices/relay/status", qos=1)
+        logger.info("Subscris la smarthome/devices/ir/status si smarthome/devices/relay/status")
+
     def disconnect(self):
         """Opreste loop-ul de retea si inchide conexiunea la broker."""
         # Opreste thread-ul de network loop
@@ -84,6 +89,103 @@ class MQTTService:
         # Publicam cu QoS 1 (at-least-once delivery)
         self.client.publish(topic, payload, qos=1)
         logger.info("Comanda publicata -> topic=%s | action=%s | value=%s", topic, action, value)
+
+    def publish_ir_command(self, device_name: str, device_type: str, action: str, value: str = None):
+        """
+        Publica o comanda IR pe topic-ul ESP32 IR Controller.
+        Formatul payload: {"device": "tv", "command": "power"}
+        Topic fix: smarthome/devices/ir/command
+        """
+        # Determina categoria de device pentru ESP32
+        device_category = "tv"  # default
+        name_lower = device_name.lower()
+
+        if "tv" in name_lower or "television" in name_lower or device_type == "ir_tv":
+            device_category = "tv"
+        elif "ac" in name_lower or "air" in name_lower or "conditioner" in name_lower or device_type == "ir_ac":
+            device_category = "ac"
+        elif "bulb" in name_lower or "rgb" in name_lower or "light" in name_lower or device_type == "ir_rgb":
+            device_category = "bulb"
+
+        # Mapeaza actiunea din app la comanda ESP32
+        command = self._map_action_to_command(device_category, action, value)
+
+        payload = json.dumps({
+            "device": device_category,
+            "command": command
+        })
+
+        self.client.publish("smarthome/devices/ir/command", payload, qos=1)
+        logger.info("IR comanda -> device=%s, command=%s", device_category, command)
+
+    def publish_relay_command(self, mqtt_topic: str, action: str, value: str = None):
+        """
+        Publica o comanda pentru ESP32 Relay Controller.
+        Topic: mqtt_topic al dispozitivului (ex: smarthome/devices/relay/command)
+        Payload: {"device": "relay", "command": "on"}
+        """
+        command = value if value else ("on" if action == "power" else action)
+        payload = json.dumps({
+            "device": "relay",
+            "command": command
+        })
+        self.client.publish(mqtt_topic, payload, qos=1)
+        logger.info("Relay comanda -> topic=%s, command=%s", mqtt_topic, command)
+
+    def publish_brand_config(self, brand: str):
+        """
+        Trimite comanda de schimbare brand TV la ESP32.
+        """
+        payload = json.dumps({
+            "device": "config",
+            "command": "set_brand",
+            "data": brand.lower()
+        })
+        self.client.publish("smarthome/devices/ir/command", payload, qos=1)
+        logger.info("Brand TV schimbat: %s", brand)
+
+    @staticmethod
+    def _map_action_to_command(device_category: str, action: str, value: str = None) -> str:
+        """
+        Mapeaza actiunea din app la comanda pe care ESP32 o intelege.
+
+        App trimite:
+          action="power", value="on"/"off"/"toggle"
+          action="volume_up"
+          action="set_temperature", value="25"
+          action="set_mode", value="cool"
+
+        ESP32 asteapta:
+          TV: "power", "volume_up", "volume_down", "channel_up", "channel_down",
+              "mute", "ok", "back", "menu", "nav_up", "nav_down", "nav_left", "nav_right", "source"
+          AC: "power_on", "power_off", "temp_up", "temp_down", "mode", "swing", "fan_up", "fan_down"
+        """
+        action_lower = action.lower()
+
+        if device_category == "ac":
+            if action_lower == "power":
+                if value and value.lower() == "off":
+                    return "power_off"
+                return "power_on"
+            elif action_lower in ("set_temperature", "set_temperature_up", "temp_up"):
+                return "temp_up"
+            elif action_lower in ("set_temperature_down", "temp_down"):
+                return "temp_down"
+            elif action_lower in ("set_mode", "mode"):
+                return "mode"
+            elif action_lower in ("set_swing", "swing"):
+                return "swing"
+            elif action_lower in ("set_fan_speed", "set_fan_speed_up", "fan_speed", "fan_up"):
+                return "fan_up"
+            elif action_lower in ("set_fan_speed_down", "fan_down"):
+                return "fan_down"
+            else:
+                return action_lower
+        else:
+            # TV si alte dispozitive IR — actiunea merge direct
+            if action_lower == "power" and value and value.lower() == "toggle":
+                return "power"
+            return action_lower
 
 
 # Instanta singleton folosita in toata aplicatia

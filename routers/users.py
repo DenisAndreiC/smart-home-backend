@@ -1,187 +1,191 @@
-# Router pentru gestionarea profilului utilizatorului autentificat.
-# Expune endpoint-uri REST sub prefixul /users.
-# Permite actualizarea username-ului, display_name-ului si incarcarea unui avatar.
-# Toate operatiile sunt protejate — necesita autentificare JWT.
+# Router for managing the authenticated user's profile.
+# Exposes REST endpoints under the /users prefix.
+# Allows updating username, display_name and uploading a profile avatar.
+# All operations require JWT authentication.
 
-import os    # Folosit pentru operatii pe sistemul de fisiere (creare director, stergere fisier vechi)
-import uuid  # Genereaza identificatori unici pentru numele fisierelor de avatar
+import os    # filesystem operations: create directory, remove old avatar file
+import uuid  # generate unique filenames for uploaded avatar images
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-# Importam modelul ORM User si functia de sesiune a bazei de date
+# ORM model and DB session factory
 from database.db import User, get_db
 
-# Importam schemele Pydantic pentru validarea datelor si formatarea raspunsurilor
+# Pydantic schemas for request validation and response serialisation
 from models.schemas import UserResponse, UserUpdate
 
-# Dependency de autentificare — extrage si valideaza utilizatorul din token-ul JWT
+# FastAPI dependency that extracts and validates the current user from the JWT
 from services.auth_service import get_current_user
 
-# Router cu prefix /users — toate rutele devin /api/users/...
+# Router prefix /users — all routes resolve to /api/users/...
 router = APIRouter(prefix="/users", tags=["Utilizatori"])
 
-# Calea relativa a directorului unde sunt stocate avatarele utilizatorilor
+# Relative path of the directory where avatar images are stored on disk
 AVATARS_DIR = "static/avatars"
 
 
 @router.get("/me", response_model=UserResponse)
 def get_me(
-    current_user: User = Depends(get_current_user),  # utilizatorul autentificat din token JWT
+    current_user: User = Depends(get_current_user),  # authenticated user injected from JWT
 ):
     """
-    Returneaza profilul complet al utilizatorului curent.
+    Return the full profile of the currently authenticated user.
 
-    Include toate campurile publice: id, email, username, display_name, avatar_url, created_at.
-    Nu include parola sau hash-ul acesteia.
+    Includes all public fields: id, email, username, display_name, avatar_url, created_at.
+    The hashed password is never exposed.
 
-    Parametri:
-        current_user : utilizatorul autentificat (injectat din token JWT)
+    Args:
+        current_user: ORM User object injected via the JWT dependency.
 
-    Returneaza:
-        UserResponse cu datele complete ale utilizatorului curent
+    Returns:
+        UserResponse with the current user's data.
     """
-    # Returnam direct obiectul ORM — FastAPI il serializeaza dupa schema UserResponse
+    # Return the ORM object directly; FastAPI serialises it via UserResponse
     return current_user
 
 
 @router.put("/me", response_model=UserResponse)
 def update_me(
-    date: UserUpdate,                                # campurile de actualizat (username, display_name)
-    db: Session = Depends(get_db),                  # sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user), # utilizatorul autentificat din token JWT
+    date: UserUpdate,                                # fields to update (username and/or display_name)
+    db: Session = Depends(get_db),                  # SQLAlchemy session injected by FastAPI
+    current_user: User = Depends(get_current_user), # authenticated user injected from JWT
 ):
     """
-    Actualizeaza profilul utilizatorului curent (username si/sau display_name).
+    Update the current user's profile (username and/or display_name).
 
-    Suporta actualizare partiala — campurile omise din body raman neschimbate.
-    Verifica unicitatea noului username inainte de salvare pentru a preveni duplicatele.
+    Supports partial updates — fields omitted from the request body are left unchanged.
+    Validates username uniqueness before saving to prevent duplicates.
 
-    Parametri:
-        date:         Campurile de actualizat (toate optionale, partial update)
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
+    Args:
+        date:         Fields to update (all optional, partial-update semantics).
+        db:           SQLAlchemy session shared with the get_current_user dependency.
+        current_user: ORM User object attached to the same db session.
 
-    Returneaza:
-        UserResponse cu datele actualizate ale utilizatorului
+    Returns:
+        UserResponse with the updated user data.
 
-    Arunca:
-        HTTPException 400 — daca body-ul este gol (niciun camp de actualizat)
-        HTTPException 409 — daca noul username este deja folosit de alt utilizator
+    Raises:
+        HTTPException 400: if the request body contains no fields to update.
+        HTTPException 409: if the requested username is already taken by another user.
     """
-    # Extragem doar campurile furnizate explicit in request body (actualizare partiala)
-    # exclude_unset=True asigura ca nu suprascriem campuri cu None pentru campurile omise
-    campuri = date.model_dump(exclude_unset=True)  # dict cu campurile modificate explicit
+    # Extract only the fields that were explicitly provided in the request body.
+    # exclude_unset=True prevents overwriting existing values with None for omitted fields.
+    fields = date.model_dump(exclude_unset=True)  # dict containing only the explicitly sent fields
 
-    # Daca body-ul nu contine niciun camp, returnam eroare 400 — nu avem ce actualiza
-    if not campuri:
+    # Return 400 if the caller sent an empty body — nothing to update
+    if not fields:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,    # 400 = cerere invalida
-            detail="Niciun camp de actualizat",         # mesaj explicit pentru client
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update",
         )
 
-    # Verificam unicitatea noului username daca a fost furnizat in request
-    # Cautam alt utilizator cu acelasi username, excludand utilizatorul curent (id diferit)
-    if "username" in campuri:
+    # If a new username was provided, verify it is not already taken by a different user
+    if "username" in fields:
         existing = (
             db.query(User)
             .filter(
-                User.username == campuri["username"],  # username identic cu cel dorit
-                User.id != current_user.id,            # dar apartin altui utilizator
+                User.username == fields["username"],  # same username
+                User.id != current_user.id,           # but a different account
             )
-            .first()  # returneaza primul rezultat sau None
+            .first()
         )
-        # Daca exista deja un utilizator cu acest username, returnam conflict 409
         if existing:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,   # 409 = conflict de date
-                detail="Username-ul este deja folosit", # mesaj explicit pentru client
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Username already taken",
             )
 
-    # Aplicam fiecare camp actualizat direct pe obiectul ORM al utilizatorului curent
-    for camp, val in campuri.items():
-        setattr(current_user, camp, val)  # actualizam atributul ORM cu noua valoare
+    # Apply each updated field to the ORM object via setattr
+    for field, value in fields.items():
+        setattr(current_user, field, value)
 
-    # Persistam modificarile in baza de date intr-o singura tranzactie
-    db.commit()            # executam UPDATE-ul efectiv
-    db.refresh(current_user)  # reincarcam din DB pentru valorile finale actualizate
+    # Explicitly re-attach the object to the session to guarantee dirty-state tracking.
+    # This is a defensive measure in case the object was in a detached or expired state
+    # (e.g. due to an intermediate flush triggered by the get_current_user dependency).
+    db.add(current_user)
 
-    # Returnam utilizatorul actualizat; FastAPI il serializeaza dupa schema UserResponse
+    # Flush the dirty object to the DB and commit the transaction
+    db.commit()
+
+    # Reload the object from DB so the returned data reflects the final persisted state
+    db.refresh(current_user)
+
+    # FastAPI serialises the ORM object via UserResponse
     return current_user
 
 
 @router.post("/me/avatar", response_model=UserResponse)
 async def upload_avatar(
-    file: UploadFile = File(...),                   # fisierul imagine incarcat prin multipart/form-data
-    db: Session = Depends(get_db),                  # sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user), # utilizatorul autentificat din token JWT
+    file: UploadFile = File(...),                   # image file sent as multipart/form-data
+    db: Session = Depends(get_db),                  # SQLAlchemy session injected by FastAPI
+    current_user: User = Depends(get_current_user), # authenticated user injected from JWT
 ):
     """
-    Incarca o imagine de profil (avatar) pentru utilizatorul curent.
+    Upload a profile picture (avatar) for the currently authenticated user.
 
-    Fisierul este salvat in static/avatars/ cu un nume unic format din
-    id-ul utilizatorului si un UUID random pentru a evita coliziunile.
-    Avatarul vechi este sters automat de pe disk daca exista.
-    Campul avatar_url din DB este actualizat cu path-ul relativ al noului fisier.
+    The file is saved to static/avatars/ under a unique name composed of the user id
+    and a random UUID hex to avoid collisions and prevent name guessing.
+    The previous avatar is automatically deleted from disk if one exists.
+    The avatar_url column in the DB is updated with the new relative URL.
 
-    Formate acceptate: JPEG, PNG, GIF, WebP.
+    Accepted MIME types: image/jpeg, image/png, image/gif, image/webp.
 
-    Parametri:
-        file:         Fisierul imagine incarcat (multipart/form-data)
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
+    Args:
+        file:         Uploaded image file (multipart/form-data).
+        db:           SQLAlchemy session injected by FastAPI.
+        current_user: ORM User object attached to the same db session.
 
-    Returneaza:
-        UserResponse cu noul avatar_url populat
+    Returns:
+        UserResponse with the updated avatar_url field.
 
-    Arunca:
-        HTTPException 400 — daca tipul MIME al fisierului nu este suportat
+    Raises:
+        HTTPException 400: if the file MIME type is not supported.
     """
-    # Setul tipurilor MIME acceptate pentru avatare
+    # Set of accepted MIME types for avatar uploads
     allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
-    # Verificam ca fisierul incarcat are un tip MIME suportat
+    # Reject the upload early if the content type is not in the allowed set
     if file.content_type not in allowed_types:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,                                # 400 = date invalide
-            detail="Tipul fisierului nu este suportat. Folositi JPEG, PNG, GIF sau WebP.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported file type. Use JPEG, PNG, GIF or WebP.",
         )
 
-    # Cream directorul de avatare daca nu exista inca pe disk
-    # exist_ok=True previne eroarea daca directorul exista deja
+    # Create the avatars directory if it does not exist yet (exist_ok avoids FileExistsError)
     os.makedirs(AVATARS_DIR, exist_ok=True)
 
-    # Extragem extensia fisierului original; fallback la 'jpg' daca nu are extensie
+    # Extract the file extension from the original filename; fall back to 'jpg' if absent
     ext = file.filename.rsplit(".", 1)[-1] if "." in file.filename else "jpg"
 
-    # Generam un nume unic: {user_id}_{uuid_hex}.{ext} (ex: "42_a3f1b2c4...d9.jpg")
-    # UUID random previne suprascrierile accidentale si ghicirea numelor de fisiere
+    # Build a unique filename: "{user_id}_{uuid_hex}.{ext}" (e.g. "42_a3f1b2c4.jpg")
+    # The random UUID prevents accidental overwrites and makes filenames unpredictable
     filename = f"{current_user.id}_{uuid.uuid4().hex}.{ext}"
 
-    # Construim calea completa relativa catre fisierul de salvat
-    filepath = os.path.join(AVATARS_DIR, filename)  # ex: "static/avatars/42_abc123.jpg"
+    # Full relative path on disk (e.g. "static/avatars/42_abc123.jpg")
+    filepath = os.path.join(AVATARS_DIR, filename)
 
-    # Citim continutul fisierului incarcat in memorie si il scriem pe disk
-    content = await file.read()         # citim bytes-ii fisierului din request
+    # Read the uploaded bytes and write them to disk
+    content = await file.read()       # read the full file into memory from the request
     with open(filepath, "wb") as f:
-        f.write(content)                # scriem bytes-ii in fisierul de pe disk
+        f.write(content)              # write bytes to the destination file
 
-    # Stergem avatarul vechi de pe disk daca utilizatorul are deja unul setat
-    # Evitam acumularea fisierelor inutile in directorul de avatare
+    # Delete the previous avatar from disk to avoid accumulating unused files
     if current_user.avatar_url:
-        # Eliminam slash-ul initial pentru a obtine o cale relativa valida pe disk
-        old_path = current_user.avatar_url.lstrip("/")  # ex: "static/avatars/42_old.jpg"
+        old_path = current_user.avatar_url.lstrip("/")  # strip leading slash for a valid OS path
         if os.path.exists(old_path):
             try:
-                os.remove(old_path)  # stergem fisierul vechi de pe disk
+                os.remove(old_path)   # remove the old image file
             except OSError:
-                pass  # ignoram eroarea daca fisierul nu mai exista sau nu poate fi sters
+                pass  # ignore errors if the file is already gone or cannot be removed
 
-    # Actualizam avatar_url in DB cu path-ul HTTP relativ al noului fisier
-    # Formatul este "/static/avatars/filename" — accesibil prin FastAPI StaticFiles
+    # Update the avatar_url column with the HTTP-accessible relative path
+    # The "/static/..." prefix is served by FastAPI's StaticFiles mount in main.py
     current_user.avatar_url = f"/static/avatars/{filename}"
-    db.commit()               # persistam modificarea in baza de date
-    db.refresh(current_user)  # reincarcam obiectul pentru a reflecta starea actualizata
 
-    # Returnam utilizatorul actualizat; FastAPI il serializeaza dupa schema UserResponse
+    # Re-attach, commit and refresh — same defensive pattern as update_me
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
     return current_user
