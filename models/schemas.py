@@ -95,6 +95,30 @@ class UserUpdate(BaseModel):
     display_name: Optional[str] = None
 
 
+# Schema for POST /api/auth/change-password
+class ChangePasswordRequest(BaseModel):
+    # The user's current password in plain text — verified against the bcrypt hash in DB
+    current_password: str
+
+    # The desired new password — must be at least 6 characters
+    new_password: str = Field(min_length=6)
+
+
+# Schema for POST /api/auth/forgot-password
+class ForgotPasswordRequest(BaseModel):
+    # Email address to look up and attach a reset token to
+    email: str
+
+
+# Schema for POST /api/auth/reset-password
+class ResetPasswordRequest(BaseModel):
+    # The UUID token previously sent/logged by the forgot-password flow
+    token: str
+
+    # The new password to set after the token is validated
+    new_password: str = Field(min_length=6)
+
+
 # ---------------------------------------------------------------------------
 # Device schemas — creare, actualizare, raspuns pentru dispozitive
 # ---------------------------------------------------------------------------

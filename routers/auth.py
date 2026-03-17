@@ -1,35 +1,43 @@
-# Router pentru autentificare si gestionarea conturilor de utilizator.
-# Expune endpoint-uri REST sub prefixul /auth.
-# Toate operatiile de autentificare (register, login, profil, preferinte) sunt definite aici.
+# Router for user authentication and account management.
+# Exposes REST endpoints under the /auth prefix.
+# Handles registration, login, profile retrieval, preferences, password change,
+# password reset (stub), and email verification (stub).
+
+import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-# Importam modelele ORM (tabele din baza de date) si functia de sesiune
+logger = logging.getLogger(__name__)
+
+# ORM models and DB session factory
 from database.db import User, UserPreferences, get_db
 
-# Importam schemele Pydantic pentru validarea datelor de intrare si formatarea raspunsurilor
+# Pydantic schemas for request validation and response serialisation
 from models.schemas import (
-    Token,                    # Schema pentru raspunsul cu JWT token
-    UserLogin,                # Schema pentru datele de autentificare (email + parola)
-    UserPreferencesResponse,  # Schema pentru raspunsul cu preferintele utilizatorului
-    UserPreferencesUpdate,    # Schema pentru actualizarea preferintelor (campuri optionale)
-    UserRegister,             # Schema pentru inregistrarea unui utilizator nou
-    UserResponse,             # Schema pentru raspunsul cu datele utilizatorului
+    ChangePasswordRequest,    # Body for POST /auth/change-password
+    ForgotPasswordRequest,    # Body for POST /auth/forgot-password
+    ResetPasswordRequest,     # Body for POST /auth/reset-password
+    Token,                    # Response schema for JWT token
+    UserLogin,                # Body for POST /auth/login
+    UserPreferencesResponse,  # Response schema for user preferences
+    UserPreferencesUpdate,    # Body for PUT /auth/preferences
+    UserRegister,             # Body for POST /auth/register
+    UserResponse,             # Response schema for user data
 )
 
-# Importam functiile din serviciul de autentificare
+# Auth service helpers
 from services.auth_service import (
-    create_access_token,  # Genereaza un JWT token semnat cu cheia secreta
-    get_current_user,     # Dependenta FastAPI: extrage userul din token-ul Bearer
-    hash_password,        # Haseaza o parola folosind algoritmul bcrypt
-    verify_password,      # Verifica daca parola in clar corespunde hash-ului stocat
+    create_access_token,  # Creates a signed JWT token
+    get_current_user,     # FastAPI dependency: extracts user from Bearer token
+    hash_password,        # Hashes a plain-text password with bcrypt
+    verify_password,      # Compares plain-text password against a bcrypt hash
 )
 
-# Importam exceptiile personalizate pentru cazurile de date duplicate
+# Custom exceptions for duplicate account data
 from utils.exceptions import DuplicateEmailException, DuplicateUsernameException
 
-# Instantiem router-ul cu prefixul /auth si tag-ul pentru gruparea in Swagger UI
 router = APIRouter(prefix="/auth", tags=["Autentificare"])
 
 
@@ -62,20 +70,28 @@ def register(date: UserRegister, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == date.username).first():
         raise DuplicateUsernameException()  # HTTP 409 Conflict — username duplicat
 
-    # Cream obiectul ORM pentru noul utilizator
-    # Parola este hasata cu bcrypt — niciodata nu stocam parola in text clar
+    # Generate a one-time email verification token (UUID4 hex)
+    verification_token = uuid.uuid4().hex
+
+    # Log the token so it can be used during development (no real SMTP yet)
+    logger.info("Email verification token for %s: %s", date.email, verification_token)
+
+    # Create the ORM object for the new user.
+    # Password is hashed with bcrypt — the plain-text password is never stored.
+    # is_verified starts as False; set to True after the user clicks the verification link.
     user_nou = User(
-        email=date.email,                            # Email-ul unic al utilizatorului
-        username=date.username,                      # Username-ul unic ales de utilizator
-        hashed_password=hash_password(date.password),  # Hash bcrypt al parolei furnizate
+        email=date.email,
+        username=date.username,
+        hashed_password=hash_password(date.password),
+        is_verified=False,
+        verification_token=verification_token,
     )
 
-    # Adaugam utilizatorul in sesiunea SQLAlchemy si il persistam in baza de date
-    db.add(user_nou)      # Marcam obiectul pentru inserare in baza de date
-    db.commit()           # Executam tranzactia — INSERT efectiv in baza de date
-    db.refresh(user_nou)  # Reincarcam obiectul din DB pentru a obtine id-ul generat automat
+    # Insert the new user into the database
+    db.add(user_nou)
+    db.commit()
+    db.refresh(user_nou)
 
-    # Returnam utilizatorul nou creat; FastAPI il serializeaza dupa schema UserResponse
     return user_nou
 
 
@@ -227,13 +243,163 @@ def update_preferences(
     db.commit()        # Executam UPDATE-ul (sau INSERT daca prefs era nou)
     db.refresh(prefs)  # Reincarcam obiectul din DB pentru a obtine valorile finale actualizate
 
-    # Construim si returnam schema de raspuns cu preferintele actualizate
+    # Build and return the updated preferences response
     return UserPreferencesResponse(
-        id=prefs.id,                                        # ID-ul unic al inregistrarii de preferinte
-        user_id=prefs.user_id,                             # ID-ul utilizatorului proprietar
-        timezone=prefs.tz,                                  # Fusul orar (tz in ORM -> timezone in API)
-        language=prefs.language,                           # Limba interfetei actualizata
-        theme=prefs.theme,                                  # Tema vizuala actualizata
-        notifications_enabled=prefs.notifications_enabled, # Starea notificarilor actualizata
-        auto_detect_routines=prefs.auto_detect_routines,   # Starea detectiei automate ML actualizata
+        id=prefs.id,
+        user_id=prefs.user_id,
+        timezone=prefs.tz,
+        language=prefs.language,
+        theme=prefs.theme,
+        notifications_enabled=prefs.notifications_enabled,
+        auto_detect_routines=prefs.auto_detect_routines,
     )
+
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Change the authenticated user's password.
+
+    Verifies the current password against the stored bcrypt hash before
+    hashing and saving the new one. Login is NOT blocked during this flow.
+
+    Args:
+        body:         {current_password, new_password}
+        db:           SQLAlchemy session injected by FastAPI
+        current_user: Authenticated user from JWT
+
+    Returns:
+        {"message": "Password changed successfully"} on success
+
+    Raises:
+        HTTPException 400: if current_password does not match the stored hash
+    """
+    # Verify that the supplied current password matches the bcrypt hash in DB
+    if not verify_password(body.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+
+    # Hash the new password and persist it
+    current_user.hashed_password = hash_password(body.new_password)
+    db.add(current_user)
+    db.commit()
+
+    return {"message": "Password changed successfully"}
+
+
+@router.post("/forgot-password")
+def forgot_password(
+    body: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Initiate a password reset flow (stub — no real email is sent yet).
+
+    Generates a UUID4 reset token, saves it to the user record, and logs it.
+    Always returns a generic message regardless of whether the email exists,
+    to avoid leaking account information to potential attackers.
+
+    Args:
+        body: {email}
+        db:   SQLAlchemy session injected by FastAPI
+
+    Returns:
+        {"message": "If that email exists, a reset link has been sent."}
+    """
+    user = db.query(User).filter(User.email == body.email).first()
+
+    if user:
+        # Generate a one-time reset token and store it on the user record
+        token = uuid.uuid4().hex
+        user.reset_token = token
+        db.add(user)
+        db.commit()
+
+        # Log the token so it can be used during development (no SMTP yet)
+        logger.info("Password reset token for %s: %s", body.email, token)
+
+    # Always return the same response — do not reveal whether the email exists
+    return {"message": "If that email exists, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+def reset_password(
+    body: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Complete a password reset using the token from the forgot-password flow.
+
+    Looks up the user by reset_token, sets the new password, and clears the token.
+
+    Args:
+        body: {token, new_password}
+        db:   SQLAlchemy session injected by FastAPI
+
+    Returns:
+        {"message": "Password has been reset successfully."}
+
+    Raises:
+        HTTPException 400: if the token is invalid or has already been used
+    """
+    # Find the user that owns this reset token
+    user = db.query(User).filter(User.reset_token == body.token).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token.",
+        )
+
+    # Update the password and invalidate the token so it cannot be reused
+    user.hashed_password = hash_password(body.new_password)
+    user.reset_token = None
+    db.add(user)
+    db.commit()
+
+    return {"message": "Password has been reset successfully."}
+
+
+@router.get("/verify-email")
+def verify_email(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify a user's email address using the token sent at registration.
+
+    Marks the user as verified and clears the verification token.
+    Login is NOT blocked for unverified users — this is a stub flow.
+
+    Args:
+        token: UUID hex token from the registration verification link
+        db:    SQLAlchemy session injected by FastAPI
+
+    Returns:
+        {"message": "Email verified successfully."}
+
+    Raises:
+        HTTPException 400: if the token is invalid or has already been used
+    """
+    # Look up the user by verification token
+    user = db.query(User).filter(User.verification_token == token).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification token.",
+        )
+
+    # Mark the account as verified and clear the single-use token
+    user.is_verified = True
+    user.verification_token = None
+    db.add(user)
+    db.commit()
+
+    return {"message": "Email verified successfully."}

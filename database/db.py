@@ -107,8 +107,17 @@ class User(Base):
     # Numele de afisare optional (poate diferi de username)
     display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
-    # Calea catre avatarul utilizatorului (relativa la /static/avatars/)
+    # Path to the user's avatar image (relative to /static/avatars/)
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Whether the user's email address has been verified via the verification link
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # UUID token sent to the user's email for address verification (one-time use)
+    verification_token: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # UUID token for password reset flow; cleared after use
+    reset_token: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Relatie one-to-many catre Device: un utilizator poate detine mai multe dispozitive.
     # back_populates="owner" leaga relatia cu campul 'owner' din clasa Device.

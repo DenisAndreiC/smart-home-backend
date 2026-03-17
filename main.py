@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
         for ddl in [
             "ALTER TABLE users ADD COLUMN display_name VARCHAR(100)",
             "ALTER TABLE users ADD COLUMN avatar_url VARCHAR(500)",
+            "ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN verification_token VARCHAR(100)",
+            "ALTER TABLE users ADD COLUMN reset_token VARCHAR(100)",
         ]:
             try:
                 conn.execute(text(ddl))
