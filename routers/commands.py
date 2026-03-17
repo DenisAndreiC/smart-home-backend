@@ -110,8 +110,12 @@ def send_command(
         # Dispozitivele WoL (ex: PC-uri) primesc un magic packet UDP prin retea locala
         wake_device(device.mac_address)
     elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
-        # Dispozitive IR — trimitem pe topic-ul ESP32 IR Controller
-        mqtt_service.publish_ir_command(device.name, device.device_type, date.action, date.value)
+        # IR devices — publish to the ESP32 IR Controller topic
+        # Pass ir_remote_type so the RGB payload includes the "data" field
+        mqtt_service.publish_ir_command(
+            device.name, device.device_type, date.action, date.value,
+            ir_remote_type=device.ir_remote_type,
+        )
     elif device.device_type == "relay":
         # Dispozitive Relay — trimitem pe topic-ul specific relay-ului
         mqtt_service.publish_relay_command(device.mqtt_topic, date.action, date.value)

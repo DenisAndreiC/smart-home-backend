@@ -256,6 +256,11 @@ class Device(Base):
     # Optional (nullable) — nu toate dispozitivele suporta control IR.
     ir_codes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Remote type for ir_rgb devices: "44" (44-key remote) or "24" (24-key remote).
+    # Sent as the "data" field in MQTT payloads so the ESP32 knows which IR library to use.
+    # Only relevant for ir_rgb device type; null for all other types.
+    ir_remote_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
     # Cheia straina catre utilizatorul proprietar al dispozitivului.
     # Valoarea nu poate fi NULL — fiecare dispozitiv trebuie sa apartina unui utilizator.
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)

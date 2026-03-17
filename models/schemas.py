@@ -100,8 +100,8 @@ class ChangePasswordRequest(BaseModel):
     # The user's current password in plain text — verified against the bcrypt hash in DB
     current_password: str
 
-    # The desired new password — must be at least 6 characters
-    new_password: str = Field(min_length=6)
+    # The desired new password — length validated manually to return 400 (not 422)
+    new_password: str
 
 
 # Schema for POST /api/auth/forgot-password
@@ -162,6 +162,9 @@ class DeviceCreate(BaseModel):
     # Structura: {"on": "0xABCD", "off": "0xEFGH", "red": "0x1234", ...}
     ir_codes: Optional[dict] = None
 
+    # Remote type for ir_rgb devices: "44" or "24" (number of keys on the IR remote)
+    ir_remote_type: Optional[str] = None
+
 
 # Schema folosita la PATCH/PUT /api/devices/{id}
 # Toate campurile sunt Optional pentru a permite actualizari partiale (PATCH semantic)
@@ -190,6 +193,9 @@ class DeviceUpdate(BaseModel):
 
     # Noul dictionar de coduri IR serializat — None inseamna fara modificare
     ir_codes: Optional[dict] = None
+
+    # Remote type for ir_rgb devices: "44" or "24" — None means no change
+    ir_remote_type: Optional[str] = None
 
 
 # Schema returnata in raspunsurile ce contin informatii despre un dispozitiv
@@ -224,6 +230,9 @@ class DeviceResponse(BaseModel):
 
     # Codurile IR serializate ca string JSON — prezente doar pentru tipurile IR
     ir_codes: Optional[str] = None
+
+    # Remote type for ir_rgb devices: "44" or "24"; null for other device types
+    ir_remote_type: Optional[str] = None
 
     # ID-ul utilizatorului care detine dispozitivul (owner)
     owner_id: int

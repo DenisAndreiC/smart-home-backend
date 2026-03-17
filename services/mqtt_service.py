@@ -90,13 +90,27 @@ class MQTTService:
         self.client.publish(topic, payload, qos=1)
         logger.info("Comanda publicata -> topic=%s | action=%s | value=%s", topic, action, value)
 
-    def publish_ir_command(self, device_name: str, device_type: str, action: str, value: str = None):
+    def publish_ir_command(
+        self,
+        device_name: str,
+        device_type: str,
+        action: str,
+        value: str = None,
+        ir_remote_type: str = None,
+    ):
         """
-        Publica o comanda IR pe topic-ul ESP32 IR Controller.
-        Formatul payload: {"device": "tv", "command": "power"}
-        Topic fix: smarthome/devices/ir/command
+        Publish an IR command to the ESP32 IR Controller topic.
+
+        For ir_rgb devices the "data" field is included in the payload so the
+        ESP32 knows which IR library / remote layout to use:
+          {"device": "rgb", "command": "red", "data": "44"}
+
+        For other IR types (tv, ac) the payload is:
+          {"device": "tv", "command": "power"}
+
+        Topic: smarthome/devices/ir/command
         """
-        # Determina categoria de device pentru ESP32
+        # Determine the device category string expected by the ESP32 firmware
         device_category = "tv"  # default
         name_lower = device_name.lower()
 
@@ -105,18 +119,23 @@ class MQTTService:
         elif "ac" in name_lower or "air" in name_lower or "conditioner" in name_lower or device_type == "ir_ac":
             device_category = "ac"
         elif "bulb" in name_lower or "rgb" in name_lower or "light" in name_lower or device_type == "ir_rgb":
-            device_category = "bulb"
+            device_category = "rgb"
 
-        # Mapeaza actiunea din app la comanda ESP32
+        # Map the high-level app action to the command string the ESP32 understands
         command = self._map_action_to_command(device_category, action, value)
 
-        payload = json.dumps({
-            "device": device_category,
-            "command": command
-        })
+        # Build the base payload dict
+        data: dict = {"device": device_category, "command": command}
 
-        self.client.publish("smarthome/devices/ir/command", payload, qos=1)
-        logger.info("IR comanda -> device=%s, command=%s", device_category, command)
+        # Include the remote type for RGB devices so the ESP32 picks the right IR codes
+        if device_type == "ir_rgb" and ir_remote_type:
+            data["data"] = ir_remote_type
+
+        self.client.publish("smarthome/devices/ir/command", json.dumps(data), qos=1)
+        logger.info(
+            "IR command -> device=%s command=%s data=%s",
+            device_category, command, data.get("data"),
+        )
 
     def publish_relay_command(self, mqtt_topic: str, action: str, value: str = None):
         """
@@ -143,6 +162,25 @@ class MQTTService:
         })
         self.client.publish("smarthome/devices/ir/command", payload, qos=1)
         logger.info("Brand TV schimbat: %s", brand)
+
+    def publish_rgb_config(self, ir_remote_type: str):
+        """
+        Send the RGB remote type configuration to the ESP32 IR Controller.
+
+        Must be called before the first RGB command so the firmware loads the
+        correct IR code set.  Payload format:
+          {"device": "config", "command": "set_rgb_type", "data": "44"}
+
+        Args:
+            ir_remote_type: "44" or "24" (number of keys on the physical IR remote)
+        """
+        payload = json.dumps({
+            "device": "config",
+            "command": "set_rgb_type",
+            "data": ir_remote_type,
+        })
+        self.client.publish("smarthome/devices/ir/command", payload, qos=1)
+        logger.info("RGB config sent: set_rgb_type=%s", ir_remote_type)
 
     @staticmethod
     def _map_action_to_command(device_category: str, action: str, value: str = None) -> str:

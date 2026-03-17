@@ -292,7 +292,10 @@ async def execute_scene(
                 "MQTT IR -> topic=smarthome/devices/ir/command device='%s' type=%s action=%s value=%s",
                 device.name, device.device_type, act.action, act.value,
             )
-            mqtt_service.publish_ir_command(device.name, device.device_type, act.action, act.value)
+            mqtt_service.publish_ir_command(
+                device.name, device.device_type, act.action, act.value,
+                ir_remote_type=device.ir_remote_type,
+            )
 
         elif device.device_type == "relay":
             # Relay device: publish to the device-specific MQTT topic

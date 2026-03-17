@@ -129,6 +129,10 @@ def energy_today(
         # Calculam orele de functionare folosind helper-ul de reconstructie intervale
         hours_on = _calculate_hours_on(cmds, device.last_status, start_of_day, now)
 
+        # Skip devices that have no power commands today (nothing to report)
+        if hours_on == 0 and not cmds:
+            continue
+
         # Calculam consumul in kWh: durata (ore) x putere (kW)
         kwh = round(hours_on * power_kw, 4)  # rotunjim la 4 zecimale pentru precizie
 

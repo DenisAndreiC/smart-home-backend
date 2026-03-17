@@ -278,6 +278,13 @@ def change_password(
     Raises:
         HTTPException 400: if current_password does not match the stored hash
     """
+    # Validate new password length before touching the hash (returns 400, not 422)
+    if len(body.new_password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 6 characters",
+        )
+
     # Verify that the supplied current password matches the bcrypt hash in DB
     if not verify_password(body.current_password, current_user.hashed_password):
         raise HTTPException(

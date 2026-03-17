@@ -154,15 +154,18 @@ def create_device(
     # Daca nu exista coduri IR (None sau dict gol), stocam None in coloana
     ir_codes_str = json.dumps(date.ir_codes) if date.ir_codes else None  # JSON string sau None
 
-    # Cream obiectul ORM pentru noul dispozitiv cu toate campurile furnizate
+    # Create the ORM object for the new device with all supplied fields
     device_nou = Device(
-        name=date.name,               # Numele dispozitivului (ex: "Televizor Living")
-        device_type=date.device_type, # Tipul dispozitivului (ex: "mqtt", "ir", "wol")
-        room=date.room,               # Numele camerei in care se afla dispozitivul
-        mqtt_topic=date.mqtt_topic,   # Topic-ul MQTT pentru comunicare (ex: "home/living/tv")
-        mac_address=date.mac_address, # Adresa MAC pentru WoL (None pentru celelalte tipuri)
-        ir_codes=ir_codes_str,        # Codurile IR serializate ca JSON string (sau None)
-        owner_id=current_user.id,     # ID-ul utilizatorului proprietar al dispozitivului
+        name=date.name,
+        device_type=date.device_type,
+        room=date.room,
+        room_id=date.room_id,
+        mqtt_topic=date.mqtt_topic,
+        mac_address=date.mac_address,
+        ir_codes=ir_codes_str,
+        # ir_remote_type is only meaningful for ir_rgb devices ("44" or "24")
+        ir_remote_type=date.ir_remote_type,
+        owner_id=current_user.id,
     )
 
     # Persistam dispozitivul nou in baza de date
@@ -228,7 +231,10 @@ async def all_off(
             logger.info(
                 "all-off IR -> device='%s' type=%s", device.name, device.device_type
             )
-            mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off")
+            mqtt_service.publish_ir_command(
+                device.name, device.device_type, "power", "off",
+                ir_remote_type=device.ir_remote_type,
+            )
 
         elif device.device_type == "relay":
             # Relay devices: publish to the device-specific MQTT topic
@@ -305,7 +311,10 @@ async def away_mode(
         if device.device_type == "ir_rgb":
             # RGB bulb: set colour to RED as a visual alarm indicator
             logger.info("away-mode RGB red -> device='%s'", device.name)
-            mqtt_service.publish_ir_command(device.name, device.device_type, "color", "red")
+            mqtt_service.publish_ir_command(
+                device.name, device.device_type, "color", "red",
+                ir_remote_type=device.ir_remote_type,
+            )
             device.last_status = "red"
             cmd = Command(
                 device_id=device.id,
@@ -443,34 +452,89 @@ def update_device(
 
 @router.delete("/{device_id}")
 def delete_device(
-    device_id: int,                                  # ID-ul dispozitivului de sters (path param)
-    db: Session = Depends(get_db),                   # Sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user),  # Utilizatorul autentificat curent din token JWT
+    device_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Sterge un dispozitiv si toate comenzile asociate (stergere in cascada).
+    Delete a device and all associated data for any device type.
 
-    Cascade delete-ul este configurat la nivel de model ORM/baza de date,
-    astfel toate comenzile (Command) legate de acest dispozitiv sunt sterse automat.
+    Manually removes SceneAction rows first (no cascade configured on that
+    relation) then deletes the device — the ORM cascade will clean up
+    the Command rows automatically.
 
-    Parametri:
-        device_id:    ID-ul numeric al dispozitivului de sters (din URL path)
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
+    Args:
+        device_id:    Numeric device ID from the URL path
+        db:           SQLAlchemy session injected by FastAPI
+        current_user: Authenticated user from JWT
 
-    Returneaza:
-        Dict cu mesaj de confirmare a stergerii
+    Returns:
+        {"message": "Device deleted"}
 
-    Arunca:
-        DeviceNotFoundException - HTTP 404 daca dispozitivul nu exista sau nu apartine userului
+    Raises:
+        DeviceNotFoundException: HTTP 404 if device does not exist or belongs to another user
     """
-    # Verificam ca dispozitivul exista si apartine utilizatorului curent inainte de stergere
+    from database.db import SceneAction  # local import to avoid circular reference
+
     device = _get_owned_device(device_id, current_user, db)
 
-    # Stergem dispozitivul din baza de date
-    # Cascade delete configurat in ORM va sterge automat si comenzile asociate
-    db.delete(device)  # Marcam dispozitivul pentru stergere (si cascade pentru comenzi)
-    db.commit()        # Executam DELETE-ul efectiv in baza de date
+    # SceneAction has no ORM cascade from Device, so delete those rows manually first
+    db.query(SceneAction).filter(SceneAction.device_id == device_id).delete(
+        synchronize_session=False
+    )
 
-    # Returnam mesaj de confirmare ca stergerea s-a efectuat cu succes
-    return {"message": "Dispozitivul a fost sters"}
+    # Delete the device — the ORM cascade will remove associated Command rows
+    db.delete(device)
+    db.commit()
+
+    return {"message": "Device deleted"}
+
+
+@router.post("/{device_id}/configure")
+def configure_device(
+    device_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Send the RGB remote-type configuration to the ESP32 IR Controller.
+
+    Publishes: {"device": "config", "command": "set_rgb_type", "data": "<44|24>"}
+
+    Only valid for ir_rgb devices that have ir_remote_type set.
+    Call this once before the first RGB command (e.g. after app startup or
+    when pairing a new RGB bulb) so the ESP32 loads the correct IR code set.
+
+    Args:
+        device_id:    Numeric device ID from the URL path
+        db:           SQLAlchemy session injected by FastAPI
+        current_user: Authenticated user from JWT
+
+    Returns:
+        {"message": "Config sent", "ir_remote_type": "<value>"}
+
+    Raises:
+        DeviceNotFoundException:  HTTP 404 if device does not exist or belongs to another user
+        HTTPException 400:        if the device is not ir_rgb or has no ir_remote_type set
+    """
+    device = _get_owned_device(device_id, current_user, db)
+
+    if device.device_type != "ir_rgb":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Configure endpoint is only supported for ir_rgb devices",
+        )
+
+    if not device.ir_remote_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Device has no ir_remote_type set. Update the device first.",
+        )
+
+    mqtt_service.publish_rgb_config(device.ir_remote_type)
+    logger.info(
+        "RGB config sent for device='%s' ir_remote_type=%s",
+        device.name, device.ir_remote_type,
+    )
+
+    return {"message": "Config sent", "ir_remote_type": device.ir_remote_type}

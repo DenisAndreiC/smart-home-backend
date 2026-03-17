@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT 0",
             "ALTER TABLE users ADD COLUMN verification_token VARCHAR(100)",
             "ALTER TABLE users ADD COLUMN reset_token VARCHAR(100)",
+            "ALTER TABLE devices ADD COLUMN ir_remote_type VARCHAR(10)",
         ]:
             try:
                 conn.execute(text(ddl))
