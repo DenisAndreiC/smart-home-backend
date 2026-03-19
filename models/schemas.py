@@ -96,9 +96,14 @@ class UserUpdate(BaseModel):
 
 
 # Schema for POST /api/auth/change-password
+# Accepts either current_password (verify by hash) or email_code (verify by OTP).
+# At least one of the two must be present — validated in the endpoint handler.
 class ChangePasswordRequest(BaseModel):
     # The user's current password in plain text — verified against the bcrypt hash in DB
-    current_password: str
+    current_password: Optional[str] = None
+
+    # 6-digit OTP sent to the user's email via POST /api/auth/request-password-change
+    email_code: Optional[str] = None
 
     # The desired new password — length validated manually to return 400 (not 422)
     new_password: str

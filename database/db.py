@@ -119,6 +119,12 @@ class User(Base):
     # UUID token for password reset flow; cleared after use
     reset_token: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # 6-digit numeric code sent via email for password change verification
+    password_change_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
+
+    # Expiry timestamp for password_change_code (UTC); None means no active code
+    password_change_code_expires: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Relatie one-to-many catre Device: un utilizator poate detine mai multe dispozitive.
     # back_populates="owner" leaga relatia cu campul 'owner' din clasa Device.
     # Fara cascade — stergerea utilizatorului NU sterge automat dispozitivele sale.

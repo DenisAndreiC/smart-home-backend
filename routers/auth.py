@@ -4,7 +4,9 @@
 # password reset, and email verification.
 
 import logging
+import random
 import uuid
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
@@ -218,8 +220,48 @@ def update_preferences(
     )
 
 
+@router.post("/request-password-change")
+async def request_password_change(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Send a 6-digit OTP to the authenticated user's email for password change verification.
+
+    Generates a random 6-digit code, stores it with a 10-minute expiry, and emails it.
+    The code is consumed by POST /auth/change-password via the email_code field.
+
+    Args:
+        db:           SQLAlchemy session injected by FastAPI
+        current_user: Authenticated user from JWT
+
+    Returns:
+        {"message": "Verification code sent to your email"}
+    """
+    # Generate a random 6-digit numeric code
+    code = str(random.randint(100000, 999999))
+
+    # Store the code and its expiry (10 minutes from now, UTC)
+    current_user.password_change_code = code
+    current_user.password_change_code_expires = datetime.utcnow() + timedelta(minutes=10)
+    db.add(current_user)
+    db.commit()
+
+    await send_email(
+        current_user.email,
+        "SmartHome - Password Change Code",
+        (
+            f"Your verification code is: {code}\n\n"
+            "This code expires in 10 minutes.\n\n"
+            "If you did not request this, ignore this email."
+        ),
+    )
+
+    return {"message": "Verification code sent to your email"}
+
+
 @router.post("/change-password")
-def change_password(
+async def change_password(
     body: ChangePasswordRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -227,10 +269,15 @@ def change_password(
     """
     Change the authenticated user's password.
 
-    Verifies the current password before hashing and saving the new one.
+    Supports two verification methods:
+      - Variant A: provide current_password (verified against bcrypt hash)
+      - Variant B: provide email_code (6-digit OTP sent via /request-password-change)
+
+    At least one of current_password or email_code must be present.
+    After a successful change, a confirmation email is sent to the user.
 
     Args:
-        body:         {current_password, new_password}
+        body:         {current_password?, email_code?, new_password}
         db:           SQLAlchemy session injected by FastAPI
         current_user: Authenticated user from JWT
 
@@ -238,23 +285,63 @@ def change_password(
         {"message": "Password changed successfully"}
 
     Raises:
-        HTTPException 400: if current_password does not match the stored hash
+        HTTPException 400: if neither verification method is provided,
+                           if the current password is wrong,
+                           if the OTP is invalid or expired,
+                           or if new_password is shorter than 6 characters
     """
+    # Require at least one verification method
+    if not body.current_password and not body.email_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide either current password or email verification code",
+        )
+
     if len(body.new_password) < 6:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="New password must be at least 6 characters",
         )
 
-    if not verify_password(body.current_password, current_user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect",
+    if body.email_code:
+        # Verify the OTP: must match and not be expired
+        code_valid = (
+            current_user.password_change_code is not None
+            and current_user.password_change_code == body.email_code
+            and current_user.password_change_code_expires is not None
+            and current_user.password_change_code_expires > datetime.utcnow()
         )
+        if not code_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification code",
+            )
+        # Invalidate the code after a single successful use
+        current_user.password_change_code = None
+        current_user.password_change_code_expires = None
 
+    else:
+        # Verify the current password against the stored bcrypt hash
+        if not verify_password(body.current_password, current_user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is incorrect",
+            )
+
+    # Hash and save the new password
     current_user.hashed_password = hash_password(body.new_password)
     db.add(current_user)
     db.commit()
+
+    # Send confirmation email so the user is alerted about the change
+    await send_email(
+        current_user.email,
+        "SmartHome - Password Changed",
+        (
+            "Your password was changed successfully. "
+            "If you did not do this, contact support immediately."
+        ),
+    )
 
     return {"message": "Password changed successfully"}
 
