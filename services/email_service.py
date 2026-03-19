@@ -25,15 +25,19 @@ async def send_email(to: str, subject: str, body: str) -> None:
     If SMTP_HOST is not set or sending fails, logs a warning and returns
     without raising — the application continues normally.
     """
+    logger.info("Attempting to send email to %s, subject: %s", to, subject)
+
     smtp_host = os.environ.get("SMTP_HOST")
     if not smtp_host:
-        logger.warning("SMTP_HOST not set — skipping email to %s (subject: %s)", to, subject)
+        logger.warning("SMTP not configured (SMTP_HOST missing), skipping email send to %s", to)
         return
 
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_user = os.environ.get("SMTP_USER", "")
     smtp_password = os.environ.get("SMTP_PASSWORD", "")
     smtp_from = os.environ.get("SMTP_FROM", smtp_user)
+
+    logger.info("Connecting to SMTP: %s:%d as %s", smtp_host, smtp_port, smtp_user)
 
     # Build the MIME message
     message = MIMEMultipart("alternative")
@@ -51,6 +55,6 @@ async def send_email(to: str, subject: str, body: str) -> None:
             password=smtp_password,
             start_tls=True,  # STARTTLS on port 587
         )
-        logger.info("Email sent to %s (subject: %s)", to, subject)
-    except Exception as exc:
-        logger.warning("Failed to send email to %s: %s", to, exc)
+        logger.info("Email sent successfully to %s", to)
+    except Exception as e:
+        logger.error("SMTP failed: %s: %s", type(e).__name__, e, exc_info=True)

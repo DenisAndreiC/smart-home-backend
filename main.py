@@ -2,6 +2,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+# Configure root logger so INFO messages from all app modules appear in Docker logs
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+)
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
