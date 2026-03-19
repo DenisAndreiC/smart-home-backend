@@ -1,12 +1,13 @@
 # Router for user authentication and account management.
 # Exposes REST endpoints under the /auth prefix.
 # Handles registration, login, profile retrieval, preferences, password change,
-# password reset (stub), and email verification (stub).
+# password reset, and email verification.
 
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -35,46 +36,48 @@ from services.auth_service import (
     verify_password,      # Compares plain-text password against a bcrypt hash
 )
 
+# Email service — sends real emails via Gmail SMTP
+from services.email_service import send_email
+
 # Custom exceptions for duplicate account data
 from utils.exceptions import DuplicateEmailException, DuplicateUsernameException
 
 router = APIRouter(prefix="/auth", tags=["Autentificare"])
 
+# Base URL used in email links — points to the backend API
+_BASE_URL = "http://192.168.100.184:8000/api/auth"
+
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(date: UserRegister, db: Session = Depends(get_db)):
+async def register(date: UserRegister, db: Session = Depends(get_db)):
     """
-    Inregistreaza un utilizator nou in sistem.
+    Register a new user and send a real verification email.
 
-    Verifica unicitatea email-ului si a username-ului inainte de creare.
-    Parola este hasata cu bcrypt inainte de a fi salvata in baza de date.
-    Niciodata nu se stocheaza parola in text clar.
+    Checks uniqueness of email and username before creation.
+    Password is hashed with bcrypt — never stored in plain text.
+    A verification email is sent via Gmail SMTP after account creation.
 
-    Parametri:
-        date: Datele de inregistrare (email, username, parola) validate de Pydantic
-        db:   Sesiunea SQLAlchemy injectata automat prin dependenta get_db
+    Args:
+        date: Registration data (email, username, password) validated by Pydantic
+        db:   SQLAlchemy session injected by FastAPI
 
-    Returneaza:
-        UserResponse cu datele utilizatorului nou creat (HTTP 201 Created)
+    Returns:
+        UserResponse with the newly created user data (HTTP 201 Created)
 
-    Arunca:
-        DuplicateEmailException    - daca email-ul exista deja in baza de date (HTTP 409)
-        DuplicateUsernameException - daca username-ul exista deja in baza de date (HTTP 409)
+    Raises:
+        DuplicateEmailException    - if the email already exists (HTTP 409)
+        DuplicateUsernameException - if the username already exists (HTTP 409)
     """
-    # Verificam daca exista deja un utilizator cu acelasi email in baza de date
-    # .first() returneaza primul rezultat gasit sau None daca nu exista
+    # Check if a user with the same email already exists
     if db.query(User).filter(User.email == date.email).first():
-        raise DuplicateEmailException()  # HTTP 409 Conflict — email duplicat
+        raise DuplicateEmailException()  # HTTP 409 Conflict
 
-    # Verificam daca exista deja un utilizator cu acelasi username
+    # Check if a user with the same username already exists
     if db.query(User).filter(User.username == date.username).first():
-        raise DuplicateUsernameException()  # HTTP 409 Conflict — username duplicat
+        raise DuplicateUsernameException()  # HTTP 409 Conflict
 
     # Generate a one-time email verification token (UUID4 hex)
     verification_token = uuid.uuid4().hex
-
-    # Log the token so it can be used during development (no real SMTP yet)
-    logger.info("Email verification token for %s: %s", date.email, verification_token)
 
     # Create the ORM object for the new user.
     # Password is hashed with bcrypt — the plain-text password is never stored.
@@ -87,10 +90,22 @@ def register(date: UserRegister, db: Session = Depends(get_db)):
         verification_token=verification_token,
     )
 
-    # Insert the new user into the database
     db.add(user_nou)
     db.commit()
     db.refresh(user_nou)
+
+    # Send real verification email via Gmail SMTP
+    verify_link = f"{_BASE_URL}/verify-email?token={verification_token}"
+    await send_email(
+        date.email,
+        "SmartHome - Verify your email",
+        (
+            "Welcome to SmartHome!\n\n"
+            "Click the link below to verify your email:\n"
+            f"{verify_link}\n\n"
+            "If you did not create this account, ignore this email."
+        ),
+    )
 
     return user_nou
 
@@ -98,152 +113,100 @@ def register(date: UserRegister, db: Session = Depends(get_db)):
 @router.post("/login", response_model=Token)
 def login(date: UserLogin, db: Session = Depends(get_db)):
     """
-    Autentifica utilizatorul si returneaza un JWT Bearer token.
+    Authenticate the user and return a JWT Bearer token.
 
-    Cauta utilizatorul dupa email in baza de date, verifica parola,
-    apoi genereaza un token JWT cu subject = email-ul utilizatorului.
-    Folosim mesaj generic de eroare pentru a nu dezvalui daca email-ul exista.
+    Uses a generic error message to avoid leaking whether an email exists.
 
-    Parametri:
-        date: Datele de autentificare (email + parola) validate de Pydantic
-        db:   Sesiunea SQLAlchemy injectata automat prin dependenta get_db
+    Args:
+        date: Login credentials (email + password) validated by Pydantic
+        db:   SQLAlchemy session injected by FastAPI
 
-    Returneaza:
-        Token cu campul access_token (JWT semnat) si token_type = "bearer"
+    Returns:
+        Token with access_token (signed JWT) and token_type = "bearer"
 
-    Arunca:
-        HTTPException 401 Unauthorized - daca email-ul nu exista sau parola este gresita
+    Raises:
+        HTTPException 401 Unauthorized - if email does not exist or password is wrong
     """
-    # Cautam utilizatorul dupa email in baza de date
-    # .first() returneaza None daca nu exista niciun utilizator cu email-ul respectiv
     user = db.query(User).filter(User.email == date.email).first()
 
-    # Verificam simultan daca utilizatorul exista SI daca parola corespunde hash-ului stocat
-    # Verificarea combinata previne timing attacks si nu dezvaluie daca email-ul exista
     if not user or not verify_password(date.password, user.hashed_password):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,  # 401 = credentiale invalide
-            detail="Email sau parola incorecta",        # Mesaj generic intentionat pentru securitate
-            headers={"WWW-Authenticate": "Bearer"},     # Header standard conform OAuth2 Bearer spec
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email sau parola incorecta",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Generam token-ul JWT cu subject = email-ul utilizatorului autentificat
-    # Token-ul va fi trimis in header-ul Authorization la fiecare request protejat
-    token = create_access_token(data={"sub": user.email})  # sub = subject field in JWT payload
-
-    # Returnam token-ul impachetat in schema Token (access_token + token_type)
+    token = create_access_token(data={"sub": user.email})
     return Token(access_token=token)
 
 
 @router.get("/me", response_model=UserResponse)
 def me(current_user: User = Depends(get_current_user)):
     """
-    Returneaza datele utilizatorului autentificat curent.
+    Return the currently authenticated user's data.
 
-    Endpoint protejat — necesita token JWT valid in header-ul Authorization: Bearer <token>.
-    Dependenta get_current_user extrage si valideaza automat token-ul din header.
-
-    Parametri:
-        current_user: Utilizatorul ORM extras din token-ul JWT prin dependenta get_current_user
-
-    Returneaza:
-        UserResponse cu datele utilizatorului autentificat (id, email, username etc.)
+    Protected endpoint — requires a valid JWT Bearer token.
     """
-    # Returnam direct obiectul ORM al utilizatorului curent
-    # FastAPI il serializeaza automat conform schemei UserResponse declarate in response_model
     return current_user
 
 
 @router.get("/preferences", response_model=UserPreferencesResponse)
 def get_preferences(
-    db: Session = Depends(get_db),                   # Sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user),  # Utilizatorul autentificat curent din token JWT
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Returneaza preferintele utilizatorului autentificat.
+    Return the authenticated user's preferences.
 
-    Daca utilizatorul nu are inca preferinte salvate in baza de date, creeaza automat
-    o inregistrare cu valorile implicite definite in modelul ORM si o returneaza.
-    Campul intern 'tz' din ORM este expus ca 'timezone' in raspunsul API.
-
-    Parametri:
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
-
-    Returneaza:
-        UserPreferencesResponse cu toate campurile de preferinte ale utilizatorului
+    Creates default preferences if none exist yet.
+    The ORM field 'tz' is exposed as 'timezone' in the API response.
     """
-    # Cautam preferintele existente ale utilizatorului curent filtrand dupa user_id
-    # .first() returneaza None daca utilizatorul nu are inca preferinte salvate
     prefs = db.query(UserPreferences).filter(UserPreferences.user_id == current_user.id).first()
 
-    # Daca nu exista preferinte pentru acest utilizator, le cream cu valorile implicite din model
     if not prefs:
-        prefs = UserPreferences(user_id=current_user.id)  # Obiect nou cu valorile implicite din ORM
-        db.add(prefs)      # Adaugam in sesiune pentru inserare
-        db.commit()        # Persistam in baza de date
-        db.refresh(prefs)  # Reincarcam pentru a obtine id-ul generat si valorile implicite efective
+        prefs = UserPreferences(user_id=current_user.id)
+        db.add(prefs)
+        db.commit()
+        db.refresh(prefs)
 
-    # Construim si returnam schema de raspuns mapand campurile din modelul ORM la schema API
-    # Nota: campul 'tz' din ORM este expus ca 'timezone' in API pentru claritate
     return UserPreferencesResponse(
-        id=prefs.id,                                        # ID-ul unic al inregistrarii de preferinte
-        user_id=prefs.user_id,                             # ID-ul utilizatorului caruia ii apartin
-        timezone=prefs.tz,                                  # Fusul orar (tz in ORM -> timezone in API)
-        language=prefs.language,                           # Limba interfetei (ex: "ro", "en")
-        theme=prefs.theme,                                  # Tema vizuala (ex: "dark", "light")
-        notifications_enabled=prefs.notifications_enabled, # True daca notificarile push sunt activate
-        auto_detect_routines=prefs.auto_detect_routines,   # True daca detectia automata ML este activa
+        id=prefs.id,
+        user_id=prefs.user_id,
+        timezone=prefs.tz,
+        language=prefs.language,
+        theme=prefs.theme,
+        notifications_enabled=prefs.notifications_enabled,
+        auto_detect_routines=prefs.auto_detect_routines,
     )
 
 
 @router.put("/preferences", response_model=UserPreferencesResponse)
 def update_preferences(
-    date: UserPreferencesUpdate,                          # Datele de actualizare cu campuri optionale
-    db: Session = Depends(get_db),                        # Sesiunea SQLAlchemy injectata prin dependenta
-    current_user: User = Depends(get_current_user),       # Utilizatorul autentificat curent din token JWT
+    date: UserPreferencesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Actualizeaza preferintele utilizatorului autentificat.
+    Update the authenticated user's preferences (partial update — only sent fields change).
 
-    Suporta actualizare partiala (comportament PATCH-like): doar campurile trimise explicit
-    in body-ul request-ului sunt modificate, restul campurilor raman neschimbate.
-    Daca utilizatorul nu are inca preferinte salvate, le creeaza automat inainte de actualizare.
-    Campul 'timezone' din request este mapat la campul intern 'tz' din modelul ORM.
-
-    Parametri:
-        date:         Datele de actualizare validate de Pydantic (toate campurile sunt optionale)
-        db:           Sesiunea SQLAlchemy injectata automat prin dependenta get_db
-        current_user: Utilizatorul autentificat extras din token-ul JWT
-
-    Returneaza:
-        UserPreferencesResponse cu preferintele actualizate ale utilizatorului
+    Maps the 'timezone' API field to the ORM 'tz' column.
+    Creates default preferences if none exist before applying the update.
     """
-    # Cautam preferintele existente ale utilizatorului curent in baza de date
     prefs = db.query(UserPreferences).filter(UserPreferences.user_id == current_user.id).first()
 
-    # Daca nu exista inca preferinte pentru acest utilizator, initializam un obiect nou
-    # Nu facem commit inca — il facem o singura data la finalul functiei
     if not prefs:
-        prefs = UserPreferences(user_id=current_user.id)  # Obiect nou cu valorile implicite din ORM
-        db.add(prefs)  # Adaugam in sesiune — commit-ul va face si INSERT-ul initial
+        prefs = UserPreferences(user_id=current_user.id)
+        db.add(prefs)
 
-    # Extragem doar campurile care au fost explicit furnizate in request body
-    # exclude_unset=True garanteaza ca nu suprascriem campuri cu None pentru campurile omise
-    campuri = date.model_dump(exclude_unset=True)  # Dict cu doar campurile modificate explicit
+    campuri = date.model_dump(exclude_unset=True)
 
-    # Iteram prin fiecare camp trimis si il aplicam pe obiectul ORM corespunzator
     for camp, val in campuri.items():
-        # Tratam special campul 'timezone' care in modelul ORM se numeste 'tz'
-        # Aceasta mapare evita conflictul cu cuvantul rezervat 'timezone' in unele dialecte SQL
-        attr = "tz" if camp == "timezone" else camp  # Convertim numele campului daca este necesar
-        setattr(prefs, attr, val)  # Setam atributul corespunzator pe obiectul ORM cu noua valoare
+        attr = "tz" if camp == "timezone" else camp
+        setattr(prefs, attr, val)
 
-    # Persistam toate modificarile intr-o singura tranzactie
-    db.commit()        # Executam UPDATE-ul (sau INSERT daca prefs era nou)
-    db.refresh(prefs)  # Reincarcam obiectul din DB pentru a obtine valorile finale actualizate
+    db.commit()
+    db.refresh(prefs)
 
-    # Build and return the updated preferences response
     return UserPreferencesResponse(
         id=prefs.id,
         user_id=prefs.user_id,
@@ -264,8 +227,7 @@ def change_password(
     """
     Change the authenticated user's password.
 
-    Verifies the current password against the stored bcrypt hash before
-    hashing and saving the new one. Login is NOT blocked during this flow.
+    Verifies the current password before hashing and saving the new one.
 
     Args:
         body:         {current_password, new_password}
@@ -273,26 +235,23 @@ def change_password(
         current_user: Authenticated user from JWT
 
     Returns:
-        {"message": "Password changed successfully"} on success
+        {"message": "Password changed successfully"}
 
     Raises:
         HTTPException 400: if current_password does not match the stored hash
     """
-    # Validate new password length before touching the hash (returns 400, not 422)
     if len(body.new_password) < 6:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="New password must be at least 6 characters",
         )
 
-    # Verify that the supplied current password matches the bcrypt hash in DB
     if not verify_password(body.current_password, current_user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
 
-    # Hash the new password and persist it
     current_user.hashed_password = hash_password(body.new_password)
     db.add(current_user)
     db.commit()
@@ -301,16 +260,16 @@ def change_password(
 
 
 @router.post("/forgot-password")
-def forgot_password(
+async def forgot_password(
     body: ForgotPasswordRequest,
     db: Session = Depends(get_db),
 ):
     """
-    Initiate a password reset flow (stub — no real email is sent yet).
+    Initiate a password reset flow — sends a real reset link via email.
 
-    Generates a UUID4 reset token, saves it to the user record, and logs it.
+    Generates a UUID4 reset token, saves it, then emails the reset link.
     Always returns a generic message regardless of whether the email exists,
-    to avoid leaking account information to potential attackers.
+    to avoid leaking account information.
 
     Args:
         body: {email}
@@ -328,8 +287,18 @@ def forgot_password(
         db.add(user)
         db.commit()
 
-        # Log the token so it can be used during development (no SMTP yet)
-        logger.info("Password reset token for %s: %s", body.email, token)
+        # Send real password reset email via Gmail SMTP
+        reset_link = f"{_BASE_URL}/reset-password-page?token={token}"
+        await send_email(
+            body.email,
+            "SmartHome - Reset your password",
+            (
+                "You requested a password reset.\n\n"
+                "Click the link below:\n"
+                f"{reset_link}\n\n"
+                "If you did not request this, ignore this email."
+            ),
+        )
 
     # Always return the same response — do not reveal whether the email exists
     return {"message": "If that email exists, a reset link has been sent."}
@@ -355,7 +324,6 @@ def reset_password(
     Raises:
         HTTPException 400: if the token is invalid or has already been used
     """
-    # Find the user that owns this reset token
     user = db.query(User).filter(User.reset_token == body.token).first()
 
     if not user:
@@ -373,7 +341,7 @@ def reset_password(
     return {"message": "Password has been reset successfully."}
 
 
-@router.get("/verify-email")
+@router.get("/verify-email", response_class=HTMLResponse)
 def verify_email(
     token: str,
     db: Session = Depends(get_db),
@@ -382,19 +350,18 @@ def verify_email(
     Verify a user's email address using the token sent at registration.
 
     Marks the user as verified and clears the verification token.
-    Login is NOT blocked for unverified users — this is a stub flow.
+    Returns an HTML page (not JSON) — the user opens this link from their email client.
 
     Args:
         token: UUID hex token from the registration verification link
         db:    SQLAlchemy session injected by FastAPI
 
     Returns:
-        {"message": "Email verified successfully."}
+        HTMLResponse: success page the user sees in their browser
 
     Raises:
         HTTPException 400: if the token is invalid or has already been used
     """
-    # Look up the user by verification token
     user = db.query(User).filter(User.verification_token == token).first()
 
     if not user:
@@ -409,4 +376,157 @@ def verify_email(
     db.add(user)
     db.commit()
 
-    return {"message": "Email verified successfully."}
+    return HTMLResponse(
+        content=(
+            "<html><body style='text-align:center;padding:50px;font-family:sans-serif'>"
+            "<h1>Email Verified!</h1>"
+            "<p>Your SmartHome account is now active. You can close this page.</p>"
+            "</body></html>"
+        )
+    )
+
+
+@router.get("/reset-password-page", response_class=HTMLResponse)
+def reset_password_page(token: str):
+    """
+    Serve an HTML form that allows the user to set a new password.
+
+    The form submits to POST /api/auth/reset-password via JavaScript fetch.
+    Styled to match the app's dark theme (#0D1B2A background, #00BCD4 accent).
+
+    Args:
+        token: UUID hex reset token from the forgot-password email link
+
+    Returns:
+        HTMLResponse: the password reset form page
+    """
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SmartHome - Reset Password</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: #0D1B2A;
+      color: #e0e0e0;
+      font-family: sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }}
+    .card {{
+      background: #162032;
+      border-radius: 12px;
+      padding: 40px 32px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }}
+    h1 {{
+      color: #00BCD4;
+      font-size: 1.6rem;
+      margin-bottom: 8px;
+    }}
+    p.subtitle {{
+      color: #90a4ae;
+      margin-bottom: 28px;
+      font-size: 0.95rem;
+    }}
+    label {{
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.9rem;
+      color: #b0bec5;
+    }}
+    input[type=password] {{
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid #263547;
+      border-radius: 8px;
+      background: #1e2e40;
+      color: #e0e0e0;
+      font-size: 1rem;
+      margin-bottom: 18px;
+      outline: none;
+      transition: border-color 0.2s;
+    }}
+    input[type=password]:focus {{
+      border-color: #00BCD4;
+    }}
+    button {{
+      width: 100%;
+      padding: 12px;
+      background: #00BCD4;
+      color: #0D1B2A;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+    }}
+    button:hover {{ background: #00acc1; }}
+    #msg {{
+      margin-top: 18px;
+      text-align: center;
+      font-size: 0.95rem;
+      min-height: 20px;
+    }}
+    .error {{ color: #ef5350; }}
+    .success {{ color: #00BCD4; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Reset Password</h1>
+    <p class="subtitle">Enter your new password below.</p>
+    <form id="resetForm">
+      <input type="hidden" id="token" value="{token}">
+      <label for="pw">New Password</label>
+      <input type="password" id="pw" placeholder="New password" required minlength="6">
+      <label for="pw2">Confirm Password</label>
+      <input type="password" id="pw2" placeholder="Confirm password" required minlength="6">
+      <button type="submit">Reset Password</button>
+    </form>
+    <div id="msg"></div>
+  </div>
+  <script>
+    document.getElementById('resetForm').addEventListener('submit', async function(e) {{
+      e.preventDefault();
+      const token = document.getElementById('token').value;
+      const pw = document.getElementById('pw').value;
+      const pw2 = document.getElementById('pw2').value;
+      const msg = document.getElementById('msg');
+
+      if (pw !== pw2) {{
+        msg.className = 'error';
+        msg.textContent = 'Passwords do not match.';
+        return;
+      }}
+
+      try {{
+        const res = await fetch('/api/auth/reset-password', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ token: token, new_password: pw }})
+        }});
+        if (res.ok) {{
+          document.getElementById('resetForm').style.display = 'none';
+          msg.className = 'success';
+          msg.textContent = 'Password reset successfully! You can close this page.';
+        }} else {{
+          const data = await res.json();
+          msg.className = 'error';
+          msg.textContent = data.detail || 'Something went wrong. Please try again.';
+        }}
+      }} catch (err) {{
+        msg.className = 'error';
+        msg.textContent = 'Network error. Please try again.';
+      }}
+    }});
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
