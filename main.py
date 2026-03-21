@@ -24,6 +24,7 @@ from routers.rooms import router as rooms_router
 from routers.routines import router as routines_router
 from routers.scenes import router as scenes_router
 from routers.stats import router as stats_router
+from routers.ml import router as ml_router
 from routers.users import router as users_router
 from services.mqtt_service import mqtt_service
 from services.scheduler_service import scheduler_service
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE devices ADD COLUMN ir_remote_type VARCHAR(10)",
             "ALTER TABLE users ADD COLUMN password_change_code VARCHAR(6)",
             "ALTER TABLE users ADD COLUMN password_change_code_expires DATETIME",
+            "ALTER TABLE users ADD COLUMN ml_min_occurrences INTEGER DEFAULT 5",
         ]:
             try:
                 conn.execute(text(ddl))
@@ -122,6 +124,7 @@ app.include_router(dashboard_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
 app.include_router(stats_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
+app.include_router(ml_router, prefix="/api", tags=["Machine Learning"])
 
 
 @app.get("/")

@@ -77,6 +77,9 @@ class UserResponse(BaseModel):
     # URL-ul avatarului utilizatorului
     avatar_url: Optional[str] = None
 
+    # Whether the user has verified their email address
+    is_verified: bool = False
+
     # Momentul crearii contului, setat automat de ORM
     created_at: datetime
 
@@ -714,3 +717,39 @@ class DashboardStats(BaseModel):
     # Fiecare element: {"type": "ir_rgb", "count": 3}
     # Util pentru graficul de tip pie/donut cu tipurile de dispozitive
     device_type_distribution: List[Dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# ML schemas — recommendations, anomaly detection, settings
+# ---------------------------------------------------------------------------
+
+
+# A single routine recommendation produced by the DBSCAN analysis
+class RecommendationResponse(BaseModel):
+    device_id: int
+    device_name: str
+    action: str
+    suggested_time: str   # HH:MM format, centroid of the cluster
+    confidence: float     # 0.0-1.0; higher means more consistent pattern
+    occurrences: int      # number of commands in the cluster
+    message: str          # human-readable description
+
+
+# A single anomaly detected by z-score comparison against 30-day baseline
+class AnomalyResponse(BaseModel):
+    device_id: int
+    device_name: str
+    action: str
+    time: str             # HH:MM of the anomalous command
+    z_score: float        # how many standard deviations from the mean
+    message: str          # human-readable description
+
+
+# Request body for POST /api/ml/settings
+class MLSettingsRequest(BaseModel):
+    min_occurrences: int = Field(ge=3, le=20)
+
+
+# Response for GET/POST /api/ml/settings
+class MLSettingsResponse(BaseModel):
+    min_occurrences: int
