@@ -2,22 +2,35 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Baza de date
+    """Configuratia globala a aplicatiei, citita din fisierul .env."""
+
+    # URL-ul bazei de date SQLAlchemy (implicit SQLite local)
     database_url: str
 
-    # Configurare broker MQTT
+    # Adresa hostname/IP a brokerului MQTT
     mqtt_broker: str
+
+    # Portul brokerului MQTT (implicit 1883)
     mqtt_port: int
+
+    # Username pentru autentificarea la broker (optional, gol pentru development)
     mqtt_username: str = ""
+
+    # Parola pentru autentificarea la broker (optional, gol pentru development)
     mqtt_password: str = ""
 
-    # Configurare JWT pentru autentificare
+    # Cheia secreta folosita pentru semnarea token-urilor JWT
     jwt_secret: str
+
+    # Algoritmul de semnare JWT (HS256 este recomandat)
     jwt_algorithm: str
+
+    # Durata de viata a token-ului JWT in minute (1440 = 24 ore)
     jwt_expiration_minutes: int
 
+    # Spune pydantic-settings sa citeasca valorile din fisierul .env
     model_config = {"env_file": ".env"}
 
 
-# Instanță globală folosită în toată aplicația
+# Instanta globala folosita in toata aplicatia
 settings = Settings()
