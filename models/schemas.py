@@ -732,6 +732,7 @@ class RecommendationResponse(BaseModel):
     suggested_time: str   # HH:MM format, centroid of the cluster
     confidence: float     # 0.0-1.0; higher means more consistent pattern
     occurrences: int      # number of commands in the cluster
+    distinct_days: int    # number of different calendar days the cluster spans
     message: str          # human-readable description
 
 
@@ -748,8 +749,10 @@ class AnomalyResponse(BaseModel):
 # Request body for POST /api/ml/settings
 class MLSettingsRequest(BaseModel):
     min_occurrences: int = Field(ge=3, le=20)
+    min_days: int = Field(default=4, ge=1, le=30)
 
 
 # Response for GET/POST /api/ml/settings
 class MLSettingsResponse(BaseModel):
     min_occurrences: int
+    min_days: int = 4

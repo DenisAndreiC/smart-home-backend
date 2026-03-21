@@ -51,6 +51,7 @@ def analyze_user_patterns(
     user_id: int,
     db: Session,
     min_occurrences: int = 5,
+    min_days: int = 4,
 ) -> list[dict]:
     """
     Analyze the user's command history using DBSCAN to identify repeated patterns.
@@ -61,7 +62,10 @@ def analyze_user_patterns(
     3. Extract hour as numeric feature: hour + minute/60 (e.g. 13:30 -> 13.5).
     4. Apply DBSCAN(eps=0.5, min_samples=min_occurrences) on the hours array.
        eps=0.5 means commands within 30 minutes belong to the same cluster.
-    5. For each valid cluster (label != -1), compute centroid, std deviation, and confidence.
+    5. For each valid cluster (label != -1):
+       a. Count distinct calendar days covered by the cluster.
+       b. Skip if distinct_days < min_days (avoids spam from a single session).
+       c. Compute centroid, std deviation, and confidence.
     6. Return recommendations sorted by confidence descending.
 
     Returns a list of recommendation dicts matching RecommendationResponse schema.
@@ -111,6 +115,15 @@ def analyze_user_patterns(
                 continue  # noise points — not a pattern
 
             cluster_indices = [i for i, lbl in enumerate(labels) if lbl == label]
+            cluster_cmds = [group[i] for i in cluster_indices]
+
+            # Count distinct calendar days spanned by this cluster.
+            # Patterns that occurred on fewer days than min_days are skipped —
+            # they are likely command bursts within a single session, not habits.
+            distinct_days = len(set(cmd.timestamp.date() for cmd in cluster_cmds))
+            if distinct_days < min_days:
+                continue
+
             cluster_hours = hours[cluster_indices].flatten()
 
             mean_hour = float(np.mean(cluster_hours))
@@ -132,7 +145,8 @@ def analyze_user_patterns(
 
             message = (
                 f"You usually {action.replace('_', ' ')} {device_name} "
-                f"around {display_hour:02d}:{int(round((mean_hour % 1) * 60)):02d} {period}"
+                f"around {display_hour:02d}:{int(round((mean_hour % 1) * 60)):02d} {period} "
+                f"(detected on {distinct_days} different days)"
             )
 
             recommendations.append({
@@ -142,6 +156,7 @@ def analyze_user_patterns(
                 "suggested_time": suggested_time,
                 "confidence": round(confidence, 3),
                 "occurrences": occurrences,
+                "distinct_days": distinct_days,
                 "message": message,
             })
 

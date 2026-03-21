@@ -617,3 +617,42 @@ def reset_password_page(token: str):
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Send a new email verification link to the authenticated user.
+
+    Returns 400 if the user's email is already verified.
+    Generates a fresh UUID token, saves it to DB, and dispatches the email.
+    """
+    if current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already verified",
+        )
+
+    # Generate a new one-time verification token
+    new_token = uuid.uuid4().hex
+    current_user.verification_token = new_token
+    db.add(current_user)
+    db.commit()
+
+    verify_link = f"{_BASE_URL}/verify-email?token={new_token}"
+    await send_email(
+        current_user.email,
+        "SmartHome - Verify your email",
+        (
+            "Hello!\n\n"
+            "You requested a new verification link for your SmartHome account.\n"
+            "Click the link below to verify your email:\n"
+            f"{verify_link}\n\n"
+            "If you did not request this, ignore this email."
+        ),
+    )
+
+    return {"message": "Verification email sent"}

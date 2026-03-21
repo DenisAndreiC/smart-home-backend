@@ -128,6 +128,9 @@ class User(Base):
     # Minimum cluster size for ML routine detection; configurable per user (default 5)
     ml_min_occurrences: Mapped[int] = mapped_column(Integer, default=5)
 
+    # Minimum number of distinct calendar days a cluster must span to be a valid pattern
+    ml_min_days: Mapped[int] = mapped_column(Integer, default=4)
+
     # Relatie one-to-many catre Device: un utilizator poate detine mai multe dispozitive.
     # back_populates="owner" leaga relatia cu campul 'owner' din clasa Device.
     # Fara cascade — stergerea utilizatorului NU sterge automat dispozitivele sale.

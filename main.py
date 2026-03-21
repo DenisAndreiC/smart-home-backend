@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE users ADD COLUMN password_change_code VARCHAR(6)",
             "ALTER TABLE users ADD COLUMN password_change_code_expires DATETIME",
             "ALTER TABLE users ADD COLUMN ml_min_occurrences INTEGER DEFAULT 5",
+            "ALTER TABLE users ADD COLUMN ml_min_days INTEGER DEFAULT 4",
         ]:
             try:
                 conn.execute(text(ddl))

@@ -36,6 +36,7 @@ def get_recommendations(
     """
     # Use user's saved setting when the caller does not override it
     effective_min = min_occurrences if min_occurrences != 5 else (current_user.ml_min_occurrences or 5)
+    effective_days = current_user.ml_min_days or 4
 
     from datetime import timedelta, timezone
     from datetime import datetime
@@ -49,7 +50,7 @@ def get_recommendations(
         .count()
     )
 
-    recommendations = analyze_user_patterns(current_user.id, db, effective_min)
+    recommendations = analyze_user_patterns(current_user.id, db, effective_min, effective_days)
 
     return {
         "recommendations": recommendations,
@@ -89,10 +90,14 @@ def update_ml_settings(
         min_occurrences (int, 3-20): minimum repetitions to form a routine pattern.
     """
     current_user.ml_min_occurrences = body.min_occurrences
+    current_user.ml_min_days = body.min_days
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
-    return MLSettingsResponse(min_occurrences=current_user.ml_min_occurrences)
+    return MLSettingsResponse(
+        min_occurrences=current_user.ml_min_occurrences,
+        min_days=current_user.ml_min_days,
+    )
 
 
 @router.get("/settings", response_model=MLSettingsResponse)
@@ -100,4 +105,7 @@ def get_ml_settings(
     current_user: User = Depends(get_current_user),
 ):
     """Return the current ML settings for the authenticated user."""
-    return MLSettingsResponse(min_occurrences=current_user.ml_min_occurrences or 5)
+    return MLSettingsResponse(
+        min_occurrences=current_user.ml_min_occurrences or 5,
+        min_days=current_user.ml_min_days or 4,
+    )
