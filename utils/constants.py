@@ -22,9 +22,12 @@ JWT_TOKEN_PREFIX = "Bearer"
 # Folosit de endpoint-ul /devices/supported-actions si validare frontend
 SUPPORTED_IR_ACTIONS: dict[str, list[str]] = {
     "ir_rgb": [
-        "power",        # Pornire / oprire
-        "color",        # Culoare LED (ex: "red", "blue", hex)
-        "brightness",   # Luminozitate (0-100)
+        "power",            # Pornire / oprire bec RGB
+        "color",            # Culoare directa: red, green, blue, warm_white, cool_white
+        "brightness_up",    # Creste luminozitatea (un pas)
+        "brightness_down",  # Scade luminozitatea (un pas)
+        "flash",            # Efect flash (disponibil pe 44-key si 24-key)
+        "fade",             # Efect fade (disponibil pe 44-key si 24-key)
     ],
     "ir_tv": [
         "power",            # Pornire / oprire televizor

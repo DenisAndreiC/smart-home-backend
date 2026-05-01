@@ -219,6 +219,32 @@ class MQTTService:
                 return "fan_down"
             else:
                 return action_lower
+
+        elif device_category == "rgb":
+            # RGB IR bulbs use discrete commands matching physical remote buttons.
+            # No hex colors or percentage brightness — only named colors and step up/down.
+            if action_lower == "power":
+                return "power"
+            elif action_lower == "color":
+                # Map human-readable color names to the exact command the ESP32 expects
+                color_map = {
+                    "red": "red", "green": "green", "blue": "blue",
+                    "warm_white": "warm_white", "cool_white": "cool_white",
+                    "warm": "warm_white", "cool": "cool_white",
+                    "white": "cool_white",
+                    "flash": "flash", "fade": "fade",
+                    "jump": "jump", "auto": "auto",
+                }
+                if value and value.lower() in color_map:
+                    return color_map[value.lower()]
+                # Fallback: pass the value as-is (ESP32 will ignore unknown commands)
+                return value.lower() if value else "power"
+            elif action_lower in ("brightness_up", "brightness_down"):
+                return action_lower
+            else:
+                # Direct passthrough for commands like flash, fade, jump, auto, quick, slow
+                return action_lower
+
         else:
             # TV si alte dispozitive IR — actiunea merge direct
             if action_lower == "power" and value and value.lower() == "toggle":
