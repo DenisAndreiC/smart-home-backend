@@ -111,10 +111,18 @@ def send_command(
         wake_device(device.mac_address)
     elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
         # IR devices — publish to the ESP32 IR Controller topic
-        # Pass ir_remote_type so the RGB payload includes the "data" field
+        # Extract brand from ir_codes JSON (stored as {"brand": "samsung"}) for TV devices
+        import json as _json
+        tv_brand = None
+        if device.device_type == "ir_tv" and device.ir_codes:
+            try:
+                tv_brand = _json.loads(device.ir_codes).get("brand")
+            except Exception:
+                pass
         mqtt_service.publish_ir_command(
             device.name, device.device_type, date.action, date.value,
             ir_remote_type=device.ir_remote_type,
+            brand=tv_brand,
         )
     elif device.device_type == "relay":
         # Dispozitive Relay — trimitem pe topic-ul specific relay-ului

@@ -97,6 +97,7 @@ class MQTTService:
         action: str,
         value: str = None,
         ir_remote_type: str = None,
+        brand: str = None,
     ):
         """
         Publish an IR command to the ESP32 IR Controller topic.
@@ -127,9 +128,13 @@ class MQTTService:
         # Build the base payload dict
         data: dict = {"device": device_category, "command": command}
 
-        # Include the remote type for RGB devices so the ESP32 picks the right IR codes
+        # Include remote type for RGB so the ESP32 picks the right IR code table
         if device_type == "ir_rgb" and ir_remote_type:
             data["data"] = ir_remote_type
+
+        # Include brand for TV so the ESP32 uses the correct IR protocol
+        if device_type == "ir_tv" and brand:
+            data["brand"] = brand.lower()
 
         self.client.publish("smarthome/devices/ir/command", json.dumps(data), qos=1)
         logger.info(
