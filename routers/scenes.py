@@ -9,6 +9,7 @@ Prefixul /scenes este inregistrat cu /api in main.py -> URL final: /api/scenes/.
 """
 
 import asyncio          # asyncio.sleep for non-blocking delay between actions
+import json             # JSON parsing for ir_codes (brand extraction)
 import logging          # structured logging for MQTT debug output
 from typing import List  # List type hint used in response_model annotations
 
@@ -287,14 +288,21 @@ async def execute_scene(
 
         elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
             # IR device: publish to smarthome/devices/ir/command via ESP32 IR Controller
-            # Payload format: {"device": "tv"/"ac"/"bulb", "command": "<action>"}
+            # Payload format: {"device": "tv"/"ac"/"bulb", "command": "<action>", "brand": "philips"}
+            tv_brand = None
+            if device.device_type == "ir_tv" and device.ir_codes:
+                try:
+                    tv_brand = json.loads(device.ir_codes).get("brand")
+                except Exception:
+                    pass
             logger.info(
-                "MQTT IR -> topic=smarthome/devices/ir/command device='%s' type=%s action=%s value=%s",
-                device.name, device.device_type, act.action, act.value,
+                "MQTT IR -> topic=smarthome/devices/ir/command device='%s' type=%s action=%s value=%s brand=%s",
+                device.name, device.device_type, act.action, act.value, tv_brand,
             )
             mqtt_service.publish_ir_command(
                 device.name, device.device_type, act.action, act.value,
                 ir_remote_type=device.ir_remote_type,
+                brand=tv_brand,
             )
 
         elif device.device_type == "relay":

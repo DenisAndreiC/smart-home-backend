@@ -228,12 +228,19 @@ async def all_off(
         # Dispatch through the channel matching the device type
         if device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
             # IR devices: publish to smarthome/devices/ir/command via ESP32 IR Controller
+            tv_brand = None
+            if device.device_type == "ir_tv" and device.ir_codes:
+                try:
+                    tv_brand = json.loads(device.ir_codes).get("brand")
+                except Exception:
+                    pass
             logger.info(
-                "all-off IR -> device='%s' type=%s", device.name, device.device_type
+                "all-off IR -> device='%s' type=%s brand=%s", device.name, device.device_type, tv_brand
             )
             mqtt_service.publish_ir_command(
                 device.name, device.device_type, "power", "off",
                 ir_remote_type=device.ir_remote_type,
+                brand=tv_brand,
             )
 
         elif device.device_type == "relay":
@@ -329,8 +336,14 @@ async def away_mode(
 
         elif device.device_type in ("ir_tv", "ir_ac"):
             # IR TV or AC: power off via the ESP32 IR Controller
-            logger.info("away-mode IR off -> device='%s' type=%s", device.name, device.device_type)
-            mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off")
+            tv_brand = None
+            if device.device_type == "ir_tv" and device.ir_codes:
+                try:
+                    tv_brand = json.loads(device.ir_codes).get("brand")
+                except Exception:
+                    pass
+            logger.info("away-mode IR off -> device='%s' type=%s brand=%s", device.name, device.device_type, tv_brand)
+            mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off", brand=tv_brand)
             device.last_status = "off"
             cmd = Command(
                 device_id=device.id,

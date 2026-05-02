@@ -138,8 +138,8 @@ class MQTTService:
 
         self.client.publish("smarthome/devices/ir/command", json.dumps(data), qos=1)
         logger.info(
-            "IR command -> device=%s command=%s data=%s",
-            device_category, command, data.get("data"),
+            "IR command published -> device=%s command=%s brand=%s payload=%s",
+            device_category, command, data.get("brand", ""), json.dumps(data),
         )
 
     def publish_relay_command(self, mqtt_topic: str, action: str, value: str = None):
