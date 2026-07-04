@@ -17,7 +17,7 @@ class MQTTService:
 
     def __init__(self):
         # Folosim CallbackAPIVersion.VERSION2 - API-ul nou din paho-mqtt 2.x
-        # Vechiul API (VERSION1) este deprecat si va fi eliminat in versiuni viitoare
+        
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
         # Inregistreaza callback-urile pentru evenimentele de retea
