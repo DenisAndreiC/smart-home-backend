@@ -13,6 +13,13 @@ from database.db import Device
 from services.mqtt_service import mqtt_service
 from services.wol_service import wake_device
 
+_ON_VALUES = {"on", "1", "true", "power_on"}
+
+
+def is_device_on(device: Device) -> bool:
+    """Best-effort check of whether last_status indicates the device is currently on."""
+    return (device.last_status or "").strip().lower() in _ON_VALUES
+
 
 def send_device_command(device: Device, action: str, value: str | None = None) -> None:
     """Trimite comanda catre dispozitiv prin canalul corespunzator tipului sau."""

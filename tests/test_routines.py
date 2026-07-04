@@ -113,7 +113,8 @@ def test_detect_routines(test_client, test_user, test_device):
     Verifica ca GET /api/routines/detect returneaza 200 si detecteaza cel putin o rutina.
     Algoritmul DBSCAN analizeaza comenzile din DB si grupeaza tiparele repetitive.
     Generam date sintetice in prealabil — 3 tipare pe 30 de zile — pentru a garanta detectia.
-    Scopul testului: confirma ca serviciul ML functioneaza end-to-end si salveaza rutinele detectate.
+    Purpose: confirm the ML service works end-to-end and does NOT auto-save
+    anything to the DB anymore - the user picks candidates via POST /api/routines/.
     """
     # Generam date sintetice inainte de detectie pentru a alimenta algoritmul cu suficiente intrari
     test_client.post(
@@ -136,14 +137,21 @@ def test_detect_routines(test_client, test_user, test_device):
     # Verificam ca raspunsul contine campul 'routines_detected' — numarul de rutine gasite
     assert "routines_detected" in data
 
-    # Verificam ca raspunsul contine campul 'routines_saved' — numarul de rutine persistate in DB
-    assert "routines_saved" in data
+    # routines_saved must always be 0 - /detect no longer auto-saves anything
+    assert data["routines_saved"] == 0
 
     # Verificam ca raspunsul contine campul 'data' — detaliile rutinelor detectate
     assert "data" in data
 
     # Cu 30 de zile de date sintetice cu 3 tipare fixe, DBSCAN trebuie sa gaseasca cel putin o rutina
     assert data["routines_detected"] > 0
+
+    # Each candidate must have a candidate_index (no DB id exists - nothing is saved)
+    assert all("candidate_index" in c for c in data["data"])
+
+    # Confirm /detect persisted nothing - the saved routines list stays empty
+    routines_resp = test_client.get("/api/routines/", headers=auth_headers(test_user["token"]))
+    assert routines_resp.json() == []
 
 
 def test_toggle_routine(test_client, test_user, test_device):

@@ -34,9 +34,6 @@ from services.auth_service import get_current_user
 # generate_test_data — functia care genereaza comenzi sintetice pentru demo ML
 from services.ml_service import detect_routines, generate_test_data
 
-# Functie helper care creeaza o notificare in-app cand ML-ul detecteaza rutine noi
-from services.notification_service import notify_ml_routines_detected
-
 # Constante pentru parametrii algoritmului ML — definite central in constants.py
 # ML_DAYS_BACK       — cate zile in urma se analizeaza istoricul (ex: 30)
 # ML_MIN_OCCURRENCES — de cate ori trebuie sa apara un tipar ca sa fie considerat rutina
@@ -169,94 +166,46 @@ def detect_ml_routines(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Endpoint demo ML: analizeaza istoricul comenzilor utilizatorului cu DBSCAN,
-    detecteaza tipare repetitive si salveaza rutinele noi in baza de date.
+    Analyze the user's command history with DBSCAN and return candidate routines.
 
-    Fluxul complet:
-      1. Apeleaza detect_routines() care interogheaza istoricul si ruleaza DBSCAN
-      2. Itereaza fiecare tipar detectat si verifica daca exista deja in DB (deduplicare)
-      3. Salveaza rutinele noi ca is_ml_suggested=True si is_active=False
-      4. Daca cel putin o rutina noua a fost salvata, trimite notificare utilizatorului
-      5. Returneaza statisticile detectiei si lista tiparelor
+    This endpoint is READ-ONLY - it does not save anything to the database.
+    The user reviews the candidates and picks which ones to keep; each selected
+    candidate is then created individually via POST /api/routines/ using the same
+    device_id/action/value/trigger_time/days_of_week fields returned here.
+
+    Candidates that already match a saved routine (same device/action/value/time)
+    are filtered out so the same suggestion isn't shown again on every call.
     """
-    # ---------------------------------------------------------------------------
-    # Pasul 1: rulam algoritmul ML de detectie a tiparelor
-    # ---------------------------------------------------------------------------
-    # detect_routines() face urmatoarele intern:
-    #   - interogheaza comenzile din ultimele ML_DAYS_BACK zile pentru current_user
-    #   - grupeaza comenzile pe (device_id, action, value)
-    #   - aplica DBSCAN cu epsilon=ML_TIME_EPSILON minute pe coloana de ora
-    #   - returneaza tiparele cu cel putin ML_MIN_OCCURRENCES aparitii ca lista de dict
-    rutine_detectate = detect_routines(
-        db,                               # sesiunea DB pentru interogarea istoricului
-        current_user.id,                  # analizam doar comenzile acestui utilizator
-        days_back=ML_DAYS_BACK,           # fereastra de analiza in zile (ex: 30)
-        min_occurrences=ML_MIN_OCCURRENCES, # numarul minim de repetari pentru un tipar valid
-        time_epsilon_minutes=ML_TIME_EPSILON, # toleranta DBSCAN in minute (ex: 15 min)
+    detected = detect_routines(
+        db,
+        current_user.id,
+        days_back=ML_DAYS_BACK,
+        min_occurrences=ML_MIN_OCCURRENCES,
+        time_epsilon_minutes=ML_TIME_EPSILON,
     )
 
-    # ---------------------------------------------------------------------------
-    # Pasul 2: deduplicare — evitam salvarea rutinelor deja existente
-    # ---------------------------------------------------------------------------
-    # Contor pentru rutinele efectiv salvate in aceasta rulare
-    rutine_noi = 0
-
-    # Iteram fiecare tipar returnat de ML
-    for rutina in rutine_detectate:
-        # Verificam daca exista deja o rutina identica in baza de date
-        # O rutina este considerata duplicat daca are acelasi (user, device, action, value, timp)
-        # Aceasta verificare previne acumularea de duplicate la apeluri repetate ale endpoint-ului
+    # Filter out candidates that already exist as a saved routine for this user
+    candidates = []
+    for idx, rutina in enumerate(detected):
         exista = db.query(Routine).filter(
-            Routine.user_id == current_user.id,       # acelasi utilizator
-            Routine.device_id == rutina["device_id"], # acelasi dispozitiv
-            Routine.action == rutina["action"],        # aceeasi actiune
-            Routine.value == rutina["value"],          # aceeasi valoare (poate fi None)
-            Routine.trigger_time == rutina["trigger_time"], # aceeasi ora de declansare
+            Routine.user_id == current_user.id,
+            Routine.device_id == rutina["device_id"],
+            Routine.action == rutina["action"],
+            Routine.value == rutina["value"],
+            Routine.trigger_time == rutina["trigger_time"],
         ).first()
 
-        # Daca rutina nu exista inca, o salvam ca rutina ML sugerata
-        if not exista:
-            # Construim obiectul ORM Routine din datele returnate de ML
-            rutina_db = Routine(
-                user_id=current_user.id,              # asociem cu userul curent
-                name=rutina["name"],                  # numele generat de ML (ex: "Rutina 07:30")
-                device_id=rutina["device_id"],        # dispozitivul implicat in tipar
-                action=rutina["action"],              # actiunea repetata (ex: "on")
-                value=rutina["value"],                # valoarea actiunii (poate fi None)
-                trigger_time=rutina["trigger_time"],  # ora reprezentativa a clusterului DBSCAN
-                days_of_week=rutina["days_of_week"],  # zilele in care tiparul a aparut
-                is_ml_suggested=True,                 # marcam ca generata de ML, nu manual
-                is_active=False,                      # rutinele ML nu sunt active implicit;
-                                                      # utilizatorul trebuie sa le aprobe manual
-                confidence=rutina["confidence"],      # scorul de incredere al clusterului DBSCAN
-                                                      # (intre 0.0 si 1.0; mai mare = mai sigur)
-            )
-            # Adaugam rutina in sesiunea DB (nu e inca persistata)
-            db.add(rutina_db)
-            # Incrementam contorul de rutine noi salvate
-            rutine_noi += 1
+        if exista:
+            continue
 
-    # ---------------------------------------------------------------------------
-    # Pasul 3: notificare si commit final
-    # ---------------------------------------------------------------------------
-    # Trimitem notificare utilizatorului doar daca au fost gasite rutine noi
-    # (evitam notificari inutile daca toate tiparele existau deja)
-    if rutine_noi > 0:
-        # Creeaza o notificare in-app si o adauga in sesiunea DB
-        notify_ml_routines_detected(db, current_user.id, rutine_noi)
-        # Persistam atat rutinele noi cat si notificarea intr-o singura tranzactie
-        db.commit()
+        # candidate_index lets the frontend reference a specific suggestion
+        # (there is no DB id yet since nothing is persisted here)
+        candidates.append({**rutina, "candidate_index": idx})
 
-    # ---------------------------------------------------------------------------
-    # Pasul 4: returnam statisticile detectiei
-    # ---------------------------------------------------------------------------
     return {
-        # Numarul total de tipare identificate de ML (inclusiv duplicatele)
-        "routines_detected": len(rutine_detectate),
-        # Numarul de rutine efectiv noi salvate in baza de date in aceasta rulare
-        "routines_saved": rutine_noi,
-        # Lista completa a tiparelor detectate (utila pentru debug si afisare in UI)
-        "data": rutine_detectate,
+        "routines_detected": len(detected),
+        "routines_saved": 0,  # nothing is auto-saved anymore; kept for API compatibility
+        "data": candidates,
     }
 
 

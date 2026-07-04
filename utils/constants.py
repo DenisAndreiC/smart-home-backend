@@ -1,5 +1,13 @@
+from zoneinfo import ZoneInfo
+
 # Versiunea curenta a API-ului
 API_VERSION = "1.0.0"
+
+# Application timezone - used to interpret times entered by the user (routine
+# trigger_time) and to convert UTC timestamps to local time when computing
+# ML patterns or comparing against "now"
+APP_TIMEZONE_NAME = "Europe/Bucharest"
+APP_TIMEZONE = ZoneInfo(APP_TIMEZONE_NAME)
 
 # Calitatea de serviciu MQTT
 # 0 = fire-and-forget (fara confirmare)

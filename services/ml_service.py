@@ -8,9 +8,19 @@ from sklearn.cluster import DBSCAN
 from sqlalchemy.orm import Session
 
 from database.db import Command, Device, Routine
+from utils.constants import APP_TIMEZONE
 
 # Dedicated logger for the ML service
 logger = logging.getLogger(__name__)
+
+
+def _local(ts: datetime) -> datetime:
+    """Convert a UTC-aware Command.timestamp to the app's local timezone.
+
+    All pattern detection (hour, weekday, date) must operate on local wall-clock
+    time, since routine trigger_time is also local (see scheduler_service.py).
+    """
+    return ts.astimezone(APP_TIMEZONE)
 
 # Mapping ISO weekday number (1=Mon...7=Sun) -> short English name
 _WEEKDAY_EN = {
@@ -96,9 +106,9 @@ def analyze_user_patterns(
         if len(group) < min_occurrences:
             continue
 
-        # Extract decimal hours as clustering feature
+        # Extract decimal hours (local time) as clustering feature
         hours = np.array(
-            [cmd.timestamp.hour + cmd.timestamp.minute / 60.0 for cmd in group],
+            [_local(cmd.timestamp).hour + _local(cmd.timestamp).minute / 60.0 for cmd in group],
             dtype=float,
         ).reshape(-1, 1)
 
@@ -118,7 +128,7 @@ def analyze_user_patterns(
             # Count distinct calendar days spanned by this cluster.
             # Patterns that occurred on fewer days than min_days are skipped —
             # they are likely command bursts within a single session, not habits.
-            distinct_days = len(set(cmd.timestamp.date() for cmd in cluster_cmds))
+            distinct_days = len(set(_local(cmd.timestamp).date() for cmd in cluster_cmds))
             if distinct_days < min_days:
                 continue
 
@@ -199,7 +209,8 @@ def detect_anomalies(user_id: int, db: Session) -> list[dict]:
     baseline_groups: dict[tuple, list[float]] = defaultdict(list)
     for cmd in baseline_commands:
         key = (cmd.device_id, cmd.action)
-        hour_val = cmd.timestamp.hour + cmd.timestamp.minute / 60.0
+        ts_local = _local(cmd.timestamp)
+        hour_val = ts_local.hour + ts_local.minute / 60.0
         baseline_groups[key].append(hour_val)
 
     stats: dict[tuple, tuple[float, float]] = {}
@@ -231,7 +242,8 @@ def detect_anomalies(user_id: int, db: Session) -> list[dict]:
             # Commands always at the same time — tiny std, skip to avoid division by zero
             continue
 
-        cmd_hour = cmd.timestamp.hour + cmd.timestamp.minute / 60.0
+        ts_local = _local(cmd.timestamp)
+        cmd_hour = ts_local.hour + ts_local.minute / 60.0
         z_score = abs(cmd_hour - mean) / std
 
         if z_score <= 2.0:
@@ -243,7 +255,7 @@ def detect_anomalies(user_id: int, db: Session) -> list[dict]:
         # Format normal usage window: mean ± 1 std
         normal_start = _hours_to_time(max(0.0, mean - std))
         normal_end = _hours_to_time(min(23.99, mean + std))
-        cmd_time = f"{cmd.timestamp.hour:02d}:{cmd.timestamp.minute:02d}"
+        cmd_time = f"{ts_local.hour:02d}:{ts_local.minute:02d}"
 
         message = (
             f"Unusual: {device_name} {cmd.action.replace('_', ' ')} "
@@ -306,11 +318,11 @@ def detect_routines(
             continue
 
         time_minutes = np.array(
-            [cmd.timestamp.hour * 60 + cmd.timestamp.minute for cmd in group],
+            [_local(cmd.timestamp).hour * 60 + _local(cmd.timestamp).minute for cmd in group],
             dtype=float,
         ).reshape(-1, 1)
 
-        weekdays = [cmd.timestamp.isoweekday() for cmd in group]
+        weekdays = [_local(cmd.timestamp).isoweekday() for cmd in group]
         labels = DBSCAN(eps=time_epsilon_minutes, min_samples=min_occurrences).fit_predict(time_minutes)
 
         for label in set(labels):
@@ -364,7 +376,7 @@ def generate_test_data(db: Session, user_id: int, device_id: int) -> int:
 
     Returns the total number of commands created.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(APP_TIMEZONE)
     count = 0
 
     for days_back in range(1, 31):

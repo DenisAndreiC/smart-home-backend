@@ -1,11 +1,12 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
 
 from database.db import Command, Routine, SessionLocal
 from services.device_command_service import send_device_command
+from utils.constants import APP_TIMEZONE
 
 # Logger dedicat serviciului de scheduling
 logger = logging.getLogger(__name__)
@@ -60,8 +61,9 @@ class SchedulerService:
         Verifica rutinele active si le executa daca trigger_time == ora curenta.
         Salveaza comenzile cu source='routine' si creeaza notificari pentru user.
         """
-        # Obtine ora si ziua curenta in UTC pentru comparatie cu rutinele
-        acum = datetime.now(timezone.utc)
+        # Current time and weekday in the app's local timezone - trigger_time is
+        # entered by the user as local wall-clock time, not UTC
+        acum = datetime.now(APP_TIMEZONE)
         ora_curenta = acum.strftime("%H:%M")       # format HH:MM (ex: "18:30")
         zi_curenta = str(acum.isoweekday())        # ziua saptamanii 1=Luni...7=Duminica
 
@@ -76,6 +78,11 @@ class SchedulerService:
                     Routine.trigger_time == ora_curenta,  # trigger la ora exacta
                 )
                 .all()                                  # noqa: E712
+            )
+
+            logger.info(
+                "Scheduler tick: local_time=%s day=%s matched=%d active routine(s)",
+                ora_curenta, zi_curenta, len(rutine),
             )
 
             # Itereaza fiecare rutina candidata

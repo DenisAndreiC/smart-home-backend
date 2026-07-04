@@ -36,6 +36,9 @@ from utils.helpers import validate_mac_address
 # Importam serviciul MQTT pentru comenzile bulk (all-off, away-mode)
 from services.mqtt_service import mqtt_service
 
+# Helper to check whether a device is currently on, based on last_status
+from services.device_command_service import is_device_on
+
 # Notification helper — creates in-app notification records for each bulk command
 from services.notification_service import notify_device_command
 
@@ -226,8 +229,13 @@ async def all_off(
             await asyncio.sleep(0.3)  # non-blocking delay between commands
 
         # Dispatch through the channel matching the device type
-        if device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
-            # IR devices: publish to smarthome/devices/ir/command via ESP32 IR Controller
+        if device.device_type in ("ir_tv", "ir_rgb"):
+            # These IR remotes only expose a single toggle "power" code (no discrete
+            # off) — sending it blindly to an already-off device would turn it ON.
+            if not is_device_on(device):
+                logger.debug("all-off skipping already-off device='%s'", device.name)
+                device.last_status = "off"  # normalise unknown/off state
+                continue
             tv_brand = None
             if device.device_type == "ir_tv" and device.ir_codes:
                 try:
@@ -235,13 +243,18 @@ async def all_off(
                 except Exception:
                     pass
             logger.info(
-                "all-off IR -> device='%s' type=%s brand=%s", device.name, device.device_type, tv_brand
+                "all-off IR toggle-off -> device='%s' type=%s brand=%s", device.name, device.device_type, tv_brand
             )
             mqtt_service.publish_ir_command(
                 device.name, device.device_type, "power", "off",
                 ir_remote_type=device.ir_remote_type,
                 brand=tv_brand,
             )
+
+        elif device.device_type == "ir_ac":
+            # AC has a discrete power_off IR code - always safe to send
+            logger.info("all-off IR AC power_off -> device='%s'", device.name)
+            mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off")
 
         elif device.device_type == "relay":
             # Relay devices: publish to the device-specific MQTT topic
@@ -334,16 +347,37 @@ async def away_mode(
             notify_device_command(db, current_user.id, device.name, "color", "red")
             rgb_count += 1
 
-        elif device.device_type in ("ir_tv", "ir_ac"):
-            # IR TV or AC: power off via the ESP32 IR Controller
+        elif device.device_type == "ir_tv":
+            # TV IR remote only has a single toggle "power" code (no discrete off) -
+            # sending it blindly to an already-off TV would turn it ON.
+            if not is_device_on(device):
+                logger.debug("away-mode skipping already-off device='%s'", device.name)
+                device.last_status = "off"  # normalise unknown/off state
+                continue
             tv_brand = None
-            if device.device_type == "ir_tv" and device.ir_codes:
+            if device.ir_codes:
                 try:
                     tv_brand = json.loads(device.ir_codes).get("brand")
                 except Exception:
                     pass
-            logger.info("away-mode IR off -> device='%s' type=%s brand=%s", device.name, device.device_type, tv_brand)
+            logger.info("away-mode IR TV toggle-off -> device='%s' brand=%s", device.name, tv_brand)
             mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off", brand=tv_brand)
+            device.last_status = "off"
+            cmd = Command(
+                device_id=device.id,
+                user_id=current_user.id,
+                action="power",
+                value="off",
+                source="app",
+            )
+            db.add(cmd)
+            notify_device_command(db, current_user.id, device.name, "power", "off")
+            off_count += 1
+
+        elif device.device_type == "ir_ac":
+            # AC has a discrete power_off IR code - always safe to send
+            logger.info("away-mode IR AC power_off -> device='%s'", device.name)
+            mqtt_service.publish_ir_command(device.name, device.device_type, "power", "off")
             device.last_status = "off"
             cmd = Command(
                 device_id=device.id,
