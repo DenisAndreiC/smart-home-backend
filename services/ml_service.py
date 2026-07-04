@@ -42,9 +42,7 @@ def _days_to_english(days_str: str) -> str:
     return ", ".join(_WEEKDAY_EN[d] for d in sorted(days) if d in _WEEKDAY_EN)
 
 
-# ---------------------------------------------------------------------------
 # New API: analyze_user_patterns — used by GET /api/ml/recommendations
-# ---------------------------------------------------------------------------
 
 
 def analyze_user_patterns(
@@ -165,9 +163,7 @@ def analyze_user_patterns(
     return recommendations
 
 
-# ---------------------------------------------------------------------------
 # New API: detect_anomalies — used by GET /api/ml/anomalies
-# ---------------------------------------------------------------------------
 
 
 def detect_anomalies(user_id: int, db: Session) -> list[dict]:
@@ -267,9 +263,7 @@ def detect_anomalies(user_id: int, db: Session) -> list[dict]:
     return anomalies
 
 
-# ---------------------------------------------------------------------------
 # Legacy DBSCAN routine detection (kept for existing /api/routines ML flow)
-# ---------------------------------------------------------------------------
 
 
 def detect_routines(
@@ -356,9 +350,7 @@ def detect_routines(
     return detected
 
 
-# ---------------------------------------------------------------------------
 # Synthetic data generator for ML demo
-# ---------------------------------------------------------------------------
 
 
 def generate_test_data(db: Session, user_id: int, device_id: int) -> int:

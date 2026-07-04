@@ -6,7 +6,7 @@
 import logging
 import random
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
@@ -243,7 +243,7 @@ async def request_password_change(
 
     # Store the code and its expiry (10 minutes from now, UTC)
     current_user.password_change_code = code
-    current_user.password_change_code_expires = datetime.utcnow() + timedelta(minutes=10)
+    current_user.password_change_code_expires = datetime.now(timezone.utc) + timedelta(minutes=10)
     db.add(current_user)
     db.commit()
 
@@ -309,7 +309,7 @@ async def change_password(
             current_user.password_change_code is not None
             and current_user.password_change_code == body.email_code
             and current_user.password_change_code_expires is not None
-            and current_user.password_change_code_expires > datetime.utcnow()
+            and current_user.password_change_code_expires > datetime.now(timezone.utc)
         )
         if not code_valid:
             raise HTTPException(

@@ -25,6 +25,9 @@ from services.auth_service import get_current_user
 # Importam singleton-ul serviciului MQTT pentru publicarea comenzilor pe broker
 from services.mqtt_service import mqtt_service
 
+# Importam dispatch-ul central de comenzi (alege canalul corect: WoL, IR, relay, MQTT generic)
+from services.device_command_service import send_device_command
+
 # Importam functia de notificare pentru a alerta utilizatorul despre comenzi executate
 from services.notification_service import notify_device_command
 
@@ -105,31 +108,8 @@ def send_command(
     # Verificam ca dispozitivul exista si apartine utilizatorului curent
     device = _get_owned_device(date.device_id, current_user, db)
 
-    # Trimitem comanda prin canalul corespunzator tipului de dispozitiv
-    if device.device_type == "wol":
-        # Dispozitivele WoL (ex: PC-uri) primesc un magic packet UDP prin retea locala
-        wake_device(device.mac_address)
-    elif device.device_type in ("ir_tv", "ir_ac", "ir_rgb"):
-        # IR devices — publish to the ESP32 IR Controller topic
-        # Extract brand from ir_codes JSON (stored as {"brand": "samsung"}) for TV devices
-        import json as _json
-        tv_brand = None
-        if device.device_type == "ir_tv" and device.ir_codes:
-            try:
-                tv_brand = _json.loads(device.ir_codes).get("brand")
-            except Exception:
-                pass
-        mqtt_service.publish_ir_command(
-            device.name, device.device_type, date.action, date.value,
-            ir_remote_type=device.ir_remote_type,
-            brand=tv_brand,
-        )
-    elif device.device_type == "relay":
-        # Dispozitive Relay — trimitem pe topic-ul specific relay-ului
-        mqtt_service.publish_relay_command(device.mqtt_topic, date.action, date.value)
-    else:
-        # Fallback — folosim metoda veche pentru tipuri necunoscute
-        mqtt_service.publish_command(device.mqtt_topic, date.action, date.value)
+    # Trimitem comanda prin canalul corespunzator tipului de dispozitiv (WoL, IR, relay, MQTT generic)
+    send_device_command(device, date.action, date.value)
 
     # Inregistram comanda in baza de date — CRITIC pentru modulul ML de detectie rutine
     # Toate comenzile trimise (inclusiv cele automate) trebuie inregistrate pentru antrenare

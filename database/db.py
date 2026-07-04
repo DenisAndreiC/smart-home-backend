@@ -23,6 +23,7 @@ from sqlalchemy import (
     Integer,    # coloana de tip intreg
     String,     # coloana de tip sir de caractere cu lungime maxima
     Text,       # coloana de tip text lung fara limita de lungime
+    TypeDecorator,  # baza pentru definirea unui tip de coloana custom
     create_engine,  # functie pentru crearea motorului de conexiune la DB
 )
 
@@ -38,44 +39,47 @@ from sqlalchemy.orm import (
 # Setarile globale ale aplicatiei (URL baza de date, chei secrete etc.)
 from config import settings
 
-# ---------------------------------------------------------------------------
-# Motor si sesiune SQLAlchemy
-# ---------------------------------------------------------------------------
-
-# Motorul SQLAlchemy — obiectul central care gestioneaza conexiunile la baza de date.
-# settings.database_url contine URL-ul complet al bazei SQLite (ex: "sqlite:///./smart_home.db").
-# check_same_thread=False este necesar pentru SQLite deoarece FastAPI foloseste
-# mai multe fire de executie (threads) si SQLite implicit permite acces doar din
-# firul care a creat conexiunea.
+# Motor SQLAlchemy — check_same_thread=False e necesar pentru SQLite cu FastAPI multi-thread
 engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False},
 )
 
-# Fabrica de sesiuni — fiecare apel la SessionLocal() creeaza o noua sesiune de DB.
-# autocommit=False: tranzactiile nu se confirma automat, trebuie apelat explicit commit().
-# autoflush=False: modificarile nu se trimit automat la DB inainte de fiecare query.
-# bind=engine: leaga fabrica de motorul creat mai sus.
+# Fabrica de sesiuni — fiecare apel la SessionLocal() creeaza o noua sesiune de DB
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-# ---------------------------------------------------------------------------
-# Clasa de baza pentru toate modelele ORM
-# ---------------------------------------------------------------------------
+# Tip de coloana custom pentru timestamp-uri UTC timezone-aware
+class UTCDateTime(TypeDecorator):
+    """
+    SQLite nu are un tip DATETIME cu fus orar real — orice valoare stocata
+    este citita inapoi ca datetime naiv. Acest TypeDecorator normalizeaza
+    valorile la UTC inainte de a le salva si reataseaza tzinfo=UTC la citire,
+    astfel incat API-ul sa returneze mereu ISO 8601 cu offset explicit.
+    """
 
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+
+# Clasa de baza din care mostenesc toate modelele ORM
 class Base(DeclarativeBase):
-    """
-    Clasa de baza din care mostenesc toate modelele ORM ale aplicatiei.
-    SQLAlchemy foloseste aceasta clasa pentru a inregistra si gestiona
-    toate tabelele definite in proiect.
-    Nu contine campuri proprii — serveste doar ca punct comun de mostenire.
-    """
     pass
 
 
-# ---------------------------------------------------------------------------
 # Modele ORM — fiecare clasa reprezinta un tabel in baza de date
-# ---------------------------------------------------------------------------
 
 
 class User(Base):
@@ -102,7 +106,7 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # Timestamp-ul crearii contului — setat automat la momentul inregistrarii (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Numele de afisare optional (poate diferi de username)
     display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -123,7 +127,7 @@ class User(Base):
     password_change_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
 
     # Expiry timestamp for password_change_code (UTC); None means no active code
-    password_change_code_expires: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    password_change_code_expires: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
     # Minimum cluster size for ML routine detection; configurable per user (default 5)
     ml_min_occurrences: Mapped[int] = mapped_column(Integer, default=5)
@@ -204,7 +208,7 @@ class Room(Base):
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
 
     # Timestamp-ul crearii camerei — setat automat la momentul adaugarii (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre User: fiecare camera are un singur proprietar.
     # back_populates="rooms" leaga relatia cu campul 'rooms' din clasa User.
@@ -278,7 +282,7 @@ class Device(Base):
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
 
     # Timestamp-ul adaugarii dispozitivului in sistem — setat automat la creare (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre User: fiecare dispozitiv are un singur proprietar.
     # back_populates="devices" leaga relatia cu campul 'devices' din clasa User.
@@ -333,7 +337,7 @@ class Scene(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Timestamp-ul crearii scenei — setat automat la momentul adaugarii (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre User: fiecare scena are un singur proprietar.
     # back_populates="scenes" leaga relatia cu campul 'scenes' din clasa User.
@@ -440,7 +444,7 @@ class Command(Base):
     # Timestamp-ul exact al trimiterii comenzii (UTC) — esential pentru analiza ML.
     # Algoritmul ML foloseste ora si ziua saptamanii din acest timestamp
     # pentru a identifica tipare repetitive de comportament.
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre Device: fiecare comanda vizeaza un singur dispozitiv.
     # back_populates="commands" leaga relatia cu campul 'commands' din clasa Device.
@@ -506,7 +510,7 @@ class Routine(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Timestamp-ul crearii rutinei — setat automat la momentul adaugarii (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre User: fiecare rutina apartine unui singur utilizator.
     # back_populates="routines" leaga relatia cu campul 'routines' din clasa User.
@@ -553,7 +557,7 @@ class Notification(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Timestamp-ul crearii notificarii — setat automat la momentul generarii (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre User: fiecare notificare apartine unui singur utilizator.
     # back_populates="notifications" leaga relatia cu campul 'notifications' din clasa User.
@@ -601,7 +605,7 @@ class ActivityLog(Base):
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
     # Timestamp-ul exact al actiunii — setat automat la momentul inregistrarii (UTC)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relatie many-to-one catre User: fiecare inregistrare poate apartine unui utilizator sau poate fi NULL.
     # Tipul "User | None" reflecta faptul ca user_id este nullable.
@@ -656,47 +660,15 @@ class UserPreferences(Base):
     user: Mapped["User"] = relationship("User", back_populates="preferences")
 
 
-# ---------------------------------------------------------------------------
 # Dependency FastAPI — sesiune de baza de date per request HTTP
-# ---------------------------------------------------------------------------
-
-
 def get_db() -> Generator:
-    """
-    Generator FastAPI dependency pentru gestionarea sesiunii de baza de date.
-
-    Aceasta functie este injectata in routere prin mecanismul Depends() al FastAPI.
-    La fiecare request HTTP care o foloseste, se creeaza o sesiune noua de DB,
-    se executa logica endpoint-ului, iar la final sesiunea este inchisa automat —
-    indiferent daca requestul s-a terminat cu succes sau cu o exceptie.
-
-    Utilizare in routere:
-        @router.get("/example")
-        def example_endpoint(db: Session = Depends(get_db)):
-            ...
-
-    Flux de executie:
-        1. SessionLocal() — se creeaza o sesiune noua (conexiune la SQLite)
-        2. yield db — se pune sesiunea la dispozitia endpoint-ului
-        3. finally: db.close() — sesiunea se inchide intotdeauna la final,
-           eliberand conexiunea inapoi in pool-ul SQLAlchemy.
-
-    Returns:
-        Generator care produce un obiect Session SQLAlchemy.
-    """
-    # Cream o noua sesiune de baza de date folosind fabrica SessionLocal
+    """Creeaza o sesiune DB noua per request si o inchide la final, indiferent de rezultat."""
     db = SessionLocal()
     try:
-        # Punem sesiunea la dispozitia endpoint-ului prin yield (pattern generator)
         yield db
     finally:
-        # Inchidem sesiunea intotdeauna la final, chiar daca a aparut o exceptie.
-        # Acest bloc finally garanteaza ca resursele sunt eliberate corect.
         db.close()
 
 
-# Creare automata a tuturor tabelelor definite mai sus la pornirea aplicatiei.
-# SQLAlchemy compara schema existenta din fisierul SQLite cu modelele definite
-# si creeaza tabelele lipsa. Tabelele existente nu sunt modificate sau sterse.
-# Aceasta instructiune ruleaza o singura data, la importul modulului database/db.py.
+# Creeaza tabelele lipsa din schema definita mai sus (tabelele existente nu sunt modificate)
 Base.metadata.create_all(bind=engine)

@@ -14,9 +14,7 @@ from database.db import User, get_db
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-# ---------------------------------------------------------------------------
 # Parole - folosim bcrypt direct (passlib 1.7.4 nu e compatibil cu bcrypt 4+)
-# ---------------------------------------------------------------------------
 
 
 def hash_password(password: str) -> str:
@@ -38,9 +36,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
-# ---------------------------------------------------------------------------
 # JWT - generare si validare token-uri de autentificare
-# ---------------------------------------------------------------------------
 
 
 def create_access_token(data: dict) -> str:
@@ -62,9 +58,7 @@ def create_access_token(data: dict) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-# ---------------------------------------------------------------------------
 # Dependency FastAPI - user autentificat curent
-# ---------------------------------------------------------------------------
 
 
 def get_current_user(

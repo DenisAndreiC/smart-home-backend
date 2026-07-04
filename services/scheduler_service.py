@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
 
 from database.db import Command, Routine, SessionLocal
-from services.mqtt_service import mqtt_service
+from services.device_command_service import send_device_command
 
 # Logger dedicat serviciului de scheduling
 logger = logging.getLogger(__name__)
@@ -86,15 +86,14 @@ class SchedulerService:
                     continue  # sari rutina daca nu e programata pentru ziua de azi
 
                 try:
-                    # Trimite comanda MQTT catre topic-ul dispozitivului tinta
-                    mqtt_service.publish_command(
-                        rutina.device.mqtt_topic,   # topic-ul dispozitivului
-                        rutina.action,              # actiunea de executat
-                        rutina.value,               # valoarea parametrului
-                    )
+                    # Trimite comanda prin canalul corect pentru tipul dispozitivului
+                    # (acelasi dispatch folosit si de comenzile manuale din commands.py)
+                    send_device_command(rutina.device, rutina.action, rutina.value)
+                    # Actualizeaza ultimul status cunoscut, la fel ca la o comanda manuala
+                    rutina.device.last_status = rutina.value
                 except Exception as e:
-                    # Eroarea MQTT nu opreste executia celorlalte rutine
-                    logger.error("Eroare MQTT pentru rutina %s: %s", rutina.id, e)
+                    # Eroarea de trimitere nu opreste executia celorlalte rutine
+                    logger.error("Eroare la trimiterea comenzii pentru rutina %s: %s", rutina.id, e)
 
                 # Salveaza comanda in istoricul ML cu source='routine'
                 comanda = Command(

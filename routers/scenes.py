@@ -41,9 +41,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scenes", tags=["Scene"])
 
 
-# ---------------------------------------------------------------------------
 # Helper functions — reutilizate in mai multe endpoint-uri
-# ---------------------------------------------------------------------------
 
 
 def _get_owned_scene(scene_id: int, current_user: User, db: Session) -> Scene:
@@ -135,9 +133,7 @@ def _scene_to_response(scene: Scene) -> SceneResponse:
     )
 
 
-# ---------------------------------------------------------------------------
 # Endpoint-uri CRUD pentru scene
-# ---------------------------------------------------------------------------
 
 
 @router.get("/", response_model=List[SceneResponse])

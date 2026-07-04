@@ -87,9 +87,7 @@ def _get_owned_routine(routine_id: int, current_user: User, db: Session) -> Rout
     return rutina
 
 
-# ---------------------------------------------------------------------------
 # GET /api/routines/ — lista tuturor rutinelor utilizatorului curent
-# ---------------------------------------------------------------------------
 
 # response_model=List[RoutineResponse] serializeaza lista de obiecte ORM
 # in lista de dictionare JSON conform schemei RoutineResponse
@@ -108,9 +106,7 @@ def list_routines(
     return db.query(Routine).filter(Routine.user_id == current_user.id).all()
 
 
-# ---------------------------------------------------------------------------
 # POST /api/routines/ — crearea unei rutine manuale
-# ---------------------------------------------------------------------------
 
 # status_code=201 indica ca resursa a fost creata cu succes (standard REST)
 @router.post("/", response_model=RoutineResponse, status_code=status.HTTP_201_CREATED)
@@ -161,9 +157,7 @@ def create_routine(
     return rutina_noua
 
 
-# ---------------------------------------------------------------------------
 # GET /api/routines/detect — detectia ML a tiparelor repetitive
-# ---------------------------------------------------------------------------
 
 # Nu avem response_model explicit deoarece returnam un dict cu statistici,
 # nu o schema Pydantic fixa
@@ -266,9 +260,7 @@ def detect_ml_routines(
     }
 
 
-# ---------------------------------------------------------------------------
 # PUT /api/routines/{routine_id}/toggle — activare / dezactivare rutina
-# ---------------------------------------------------------------------------
 
 @router.put("/{routine_id}/toggle", response_model=RoutineResponse)
 def toggle_routine(
@@ -304,9 +296,7 @@ def toggle_routine(
     return rutina
 
 
-# ---------------------------------------------------------------------------
 # DELETE /api/routines/{routine_id} — stergerea unei rutine
-# ---------------------------------------------------------------------------
 
 @router.delete("/{routine_id}")
 def delete_routine(
@@ -336,9 +326,7 @@ def delete_routine(
     return {"message": "Rutina a fost stearsa"}
 
 
-# ---------------------------------------------------------------------------
 # POST /api/routines/generate-test-data — generare date sintetice pentru demo ML
-# ---------------------------------------------------------------------------
 
 @router.post("/generate-test-data")
 def generate_demo_data(

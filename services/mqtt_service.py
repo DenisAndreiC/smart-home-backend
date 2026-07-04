@@ -4,6 +4,7 @@ import logging
 import paho.mqtt.client as mqtt
 
 from config import settings
+from database.db import Device, SessionLocal
 
 # Logger dedicat serviciului MQTT
 logger = logging.getLogger(__name__)
@@ -66,16 +67,37 @@ class MQTTService:
         logger.info("Conectat la MQTT broker - reason code: %s", reason_code)
 
     def _on_message(self, client, userdata, message):
-        """
-        Callback apelat la primirea unui mesaj MQTT pe topic-urile subscrise.
-        Placeholder - va fi extins pentru a actualiza statusul dispozitivului in DB.
-        """
-        logger.info(
-            "Mesaj primit - topic: %s, payload: %s",
-            message.topic,
-            # Decodifica payload-ul din bytes la string; 'replace' evita erori Unicode
-            message.payload.decode("utf-8", errors="replace"),
-        )
+        """Callback apelat la primirea unui mesaj MQTT pe topic-urile subscrise."""
+        payload_str = message.payload.decode("utf-8", errors="replace")
+        logger.info("Mesaj primit - topic: %s, payload: %s", message.topic, payload_str)
+
+        if message.topic == "smarthome/devices/relay/status":
+            self._handle_relay_status(payload_str)
+
+    def _handle_relay_status(self, payload_str: str):
+        """Actualizeaza last_status si is_online pentru dispozitivele relay in DB."""
+        try:
+            data = json.loads(payload_str)
+        except json.JSONDecodeError:
+            logger.warning("Payload relay status invalid (nu e JSON): %s", payload_str)
+            return
+
+        state = data.get("state")
+        if state not in ("on", "off"):
+            logger.warning("Payload relay status fara camp 'state' valid: %s", payload_str)
+            return
+
+        # Sesiune DB noua - callback-ul MQTT ruleaza in threadul paho, nu in request context
+        db = SessionLocal()
+        try:
+            devices = db.query(Device).filter(Device.device_type == "relay").all()
+            for device in devices:
+                device.last_status = state
+                device.is_online = True
+            db.commit()
+            logger.info("Status relay actualizat in DB: %d dispozitiv(e) -> %s", len(devices), state)
+        finally:
+            db.close()
 
     def publish_command(self, topic: str, action: str, value: str = None):
         """
