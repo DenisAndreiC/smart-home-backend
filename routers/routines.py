@@ -13,7 +13,7 @@ relative la /api/routines/ (prefixul /api este adaugat in main.py).
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 # Importam modelele ORM necesare pentru interogarea bazei de date
@@ -35,10 +35,9 @@ from services.auth_service import get_current_user
 from services.ml_service import detect_routines, generate_test_data
 
 # Constante pentru parametrii algoritmului ML — definite central in constants.py
-# ML_DAYS_BACK       — cate zile in urma se analizeaza istoricul (ex: 30)
-# ML_MIN_OCCURRENCES — de cate ori trebuie sa apara un tipar ca sa fie considerat rutina
-# ML_TIME_EPSILON    — toleranta in minute pentru gruparea orelor similare in DBSCAN
-from utils.constants import ML_DAYS_BACK, ML_MIN_OCCURRENCES, ML_TIME_EPSILON
+# ML_DAYS_BACK    — cate zile in urma se analizeaza istoricul (ex: 30)
+# ML_TIME_EPSILON — toleranta in minute pentru gruparea orelor similare in DBSCAN
+from utils.constants import ML_DAYS_BACK, ML_TIME_EPSILON
 
 # Exceptie personalizata aruncata cand dispozitivul nu exista sau nu apartine userului
 from utils.exceptions import DeviceNotFoundException
@@ -160,6 +159,10 @@ def create_routine(
 # nu o schema Pydantic fixa
 @router.get("/detect")
 def detect_ml_routines(
+    # min_occurrences / min_distinct_days — aceiasi parametri ca GET /api/ml/recommendations,
+    # ca dashboard-ul si acest dialog sa arate exact aceeasi lista de candidati
+    min_occurrences: int | None = Query(default=None, ge=1, le=50),
+    min_distinct_days: int | None = Query(default=None, ge=1, le=30),
     # db — sesiunea de baza de date injectata prin Depends
     db: Session = Depends(get_db),
     # current_user — utilizatorul autentificat injectat prin Depends
@@ -173,14 +176,22 @@ def detect_ml_routines(
     candidate is then created individually via POST /api/routines/ using the same
     device_id/action/value/trigger_time/days_of_week fields returned here.
 
+    Uses the SAME detect_routines() function and the same min_occurrences/
+    min_distinct_days defaults as GET /api/ml/recommendations, so identical
+    parameter values always produce identical candidate lists on both screens.
+
     Candidates that already match a saved routine (same device/action/value/time)
     are filtered out so the same suggestion isn't shown again on every call.
     """
+    effective_min = min_occurrences if min_occurrences is not None else (current_user.ml_min_occurrences or 5)
+    effective_days = min_distinct_days if min_distinct_days is not None else (current_user.ml_min_days or 2)
+
     detected = detect_routines(
         db,
         current_user.id,
         days_back=ML_DAYS_BACK,
-        min_occurrences=ML_MIN_OCCURRENCES,
+        min_occurrences=effective_min,
+        min_distinct_days=effective_days,
         time_epsilon_minutes=ML_TIME_EPSILON,
     )
 

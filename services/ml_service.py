@@ -52,127 +52,6 @@ def _days_to_english(days_str: str) -> str:
     return ", ".join(_WEEKDAY_EN[d] for d in sorted(days) if d in _WEEKDAY_EN)
 
 
-# New API: analyze_user_patterns — used by GET /api/ml/recommendations
-
-
-def analyze_user_patterns(
-    user_id: int,
-    db: Session,
-    min_occurrences: int = 5,
-    min_days: int = 4,
-) -> list[dict]:
-    """
-    Analyze the user's command history using DBSCAN to identify repeated patterns.
-
-    Steps:
-    1. Fetch all commands for the user from the last 30 days.
-    2. Group by (device_id, action) pair.
-    3. Extract hour as numeric feature: hour + minute/60 (e.g. 13:30 -> 13.5).
-    4. Apply DBSCAN(eps=0.5, min_samples=min_occurrences) on the hours array.
-       eps=0.5 means commands within 30 minutes belong to the same cluster.
-    5. For each valid cluster (label != -1):
-       a. Count distinct calendar days covered by the cluster.
-       b. Skip if distinct_days < min_days (avoids spam from a single session).
-       c. Compute centroid, std deviation, and confidence.
-    6. Return recommendations sorted by confidence descending.
-
-    Returns a list of recommendation dicts matching RecommendationResponse schema.
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-
-    commands = (
-        db.query(Command)
-        .filter(
-            Command.user_id == user_id,
-            Command.timestamp >= cutoff,
-        )
-        .all()
-    )
-
-    total = len(commands)
-
-    if total < min_occurrences:
-        logger.info("Not enough data for user %s (%d commands)", user_id, total)
-        return []
-
-    # Group by (device_id, action) — ignore value for broader pattern matching
-    groups: dict[tuple, list[Command]] = defaultdict(list)
-    for cmd in commands:
-        groups[(cmd.device_id, cmd.action)].append(cmd)
-
-    recommendations = []
-
-    for (device_id, action), group in groups.items():
-        if len(group) < min_occurrences:
-            continue
-
-        # Extract decimal hours (local time) as clustering feature
-        hours = np.array(
-            [_local(cmd.timestamp).hour + _local(cmd.timestamp).minute / 60.0 for cmd in group],
-            dtype=float,
-        ).reshape(-1, 1)
-
-        # DBSCAN: eps=0.5 hours (30 min window), min_samples configurable
-        labels = DBSCAN(eps=0.5, min_samples=min_occurrences).fit_predict(hours)
-
-        device = db.query(Device).filter(Device.id == device_id).first()
-        device_name = device.name if device else f"Device {device_id}"
-
-        for label in set(labels):
-            if label == -1:
-                continue  # noise points — not a pattern
-
-            cluster_indices = [i for i, lbl in enumerate(labels) if lbl == label]
-            cluster_cmds = [group[i] for i in cluster_indices]
-
-            # Count distinct calendar days spanned by this cluster.
-            # Patterns that occurred on fewer days than min_days are skipped —
-            # they are likely command bursts within a single session, not habits.
-            distinct_days = len(set(_local(cmd.timestamp).date() for cmd in cluster_cmds))
-            if distinct_days < min_days:
-                continue
-
-            cluster_hours = hours[cluster_indices].flatten()
-
-            mean_hour = float(np.mean(cluster_hours))
-            std_hour = float(np.std(cluster_hours))
-            occurrences = len(cluster_indices)
-
-            # Confidence: 1.0 - normalised std deviation; capped to [0.0, 1.0]
-            # std_hour is in hours; divide by 12 to normalise (max half-day spread)
-            confidence = max(0.0, min(1.0, 1.0 - std_hour / 12.0))
-
-            suggested_time = _hours_to_time(mean_hour)
-
-            # Determine AM/PM for the message
-            hour_int = int(mean_hour)
-            period = "AM" if hour_int < 12 else "PM"
-            display_hour = hour_int if hour_int <= 12 else hour_int - 12
-            if display_hour == 0:
-                display_hour = 12
-
-            message = (
-                f"You usually {action.replace('_', ' ')} {device_name} "
-                f"around {display_hour:02d}:{int(round((mean_hour % 1) * 60)):02d} {period} "
-                f"(detected on {distinct_days} different days)"
-            )
-
-            recommendations.append({
-                "device_id": device_id,
-                "device_name": device_name,
-                "action": action,
-                "suggested_time": suggested_time,
-                "confidence": round(confidence, 3),
-                "occurrences": occurrences,
-                "distinct_days": distinct_days,
-                "message": message,
-            })
-
-    recommendations.sort(key=lambda r: r["confidence"], reverse=True)
-    logger.info("Found %d recommendations for user %s", len(recommendations), user_id)
-    return recommendations
-
-
 # New API: detect_anomalies — used by GET /api/ml/anomalies
 
 
@@ -275,7 +154,9 @@ def detect_anomalies(user_id: int, db: Session) -> list[dict]:
     return anomalies
 
 
-# Legacy DBSCAN routine detection (kept for existing /api/routines ML flow)
+# Single source of truth for routine detection - used by both GET /api/ml/recommendations
+# (dashboard) and GET /api/routines/detect (routine creation dialog), so identical
+# min_occurrences/min_distinct_days values always produce identical candidate lists.
 
 
 def detect_routines(
@@ -283,12 +164,19 @@ def detect_routines(
     user_id: int,
     days_back: int = 30,
     min_occurrences: int = 5,
+    min_distinct_days: int = 2,
     time_epsilon_minutes: float = 15.0,
 ) -> list[dict]:
     """
-    Analyze manual command history and detect repetitive patterns using DBSCAN.
+    Analyze command history and detect repetitive time-of-day patterns using DBSCAN.
 
-    Groups commands by (device_id, action, value) and clusters their times-of-day.
+    Groups commands by (device_id, action, value) and clusters their local
+    time-of-day (Europe/Bucharest). A cluster only becomes a candidate if BOTH:
+      - it has at least min_occurrences commands, AND
+      - those commands span at least min_distinct_days distinct calendar dates
+        (filters out patterns from a single day/session - e.g. someone pressing
+        a button 5 times in one evening - which is not a real repeating habit).
+
     Returns suggested routines sorted by confidence descending.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
@@ -322,26 +210,37 @@ def detect_routines(
             dtype=float,
         ).reshape(-1, 1)
 
-        weekdays = [_local(cmd.timestamp).isoweekday() for cmd in group]
         labels = DBSCAN(eps=time_epsilon_minutes, min_samples=min_occurrences).fit_predict(time_minutes)
+
+        device = db.query(Device).filter(Device.id == device_id).first()
+        device_name = device.name if device else f"Device {device_id}"
 
         for label in set(labels):
             if label == -1:
                 continue
 
             idx = [i for i, lbl in enumerate(labels) if lbl == label]
+            cluster_cmds = [group[i] for i in idx]
             times = time_minutes[idx].flatten()
-            days = [weekdays[i] for i in idx]
 
+            occurrences = len(idx)
+            if occurrences < min_occurrences:
+                continue
+
+            # Distinct calendar dates spanned by this cluster - this is the filter
+            # that was missing from routine detection (present in the old dashboard-only
+            # analyze_user_patterns, absent here), which let single-day bursts through.
+            distinct_days = len(set(_local(cmd.timestamp).date() for cmd in cluster_cmds))
+            if distinct_days < min_distinct_days:
+                continue
+
+            weekdays = [_local(cmd.timestamp).isoweekday() for cmd in cluster_cmds]
             trigger_time = _minutes_to_time(float(np.mean(times)))
-            active_days = sorted(set(days))
+            active_days = sorted(set(weekdays))
             days_of_week = ",".join(str(d) for d in active_days)
 
             expected = days_back * len(active_days) / 7
-            confidence = min(1.0, max(0.0, len(idx) / expected))
-
-            device = db.query(Device).filter(Device.id == device_id).first()
-            device_name = device.name if device else f"Device {device_id}"
+            confidence = min(1.0, max(0.0, occurrences / expected)) if expected > 0 else 0.0
 
             days_en = _days_to_english(days_of_week)
             name = f"{action.capitalize()} {device_name} at {trigger_time} - {days_en}"
@@ -353,12 +252,17 @@ def detect_routines(
                 "value": value,
                 "trigger_time": trigger_time,
                 "days_of_week": days_of_week,
+                "occurrences": occurrences,
+                "distinct_days": distinct_days,
                 "confidence": round(confidence, 3),
                 "name": name,
             })
 
     detected.sort(key=lambda r: r["confidence"], reverse=True)
-    logger.info("Detected %d routines for user %s", len(detected), user_id)
+    logger.info(
+        "Detected %d routines for user %s (min_occurrences=%d, min_distinct_days=%d)",
+        len(detected), user_id, min_occurrences, min_distinct_days,
+    )
     return detected
 
 

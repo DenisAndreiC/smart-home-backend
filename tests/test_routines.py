@@ -154,6 +154,84 @@ def test_detect_routines(test_client, test_user, test_device):
     assert routines_resp.json() == []
 
 
+def test_detect_routines_filters_single_day_pattern(test_client, test_user, test_device, test_db):
+    """
+    Verifica fix-ul critic: un tipar aparut de 5+ ori intr-o SINGURA zi
+    (ex. utilizatorul apasa un buton repetat intr-o singura seara) NU trebuie
+    sa apara ca si candidat cand min_distinct_days=2 (implicit).
+    Inainte de fix, detect_routines() nu avea deloc filtru de zile distincte,
+    spre deosebire de calea folosita de dashboard - aici e unificarea celor doua.
+    """
+    from datetime import datetime, timedelta
+
+    from database.db import Command
+    from utils.constants import APP_TIMEZONE
+
+    # Cream 6 comenzi identice, toate in aceeasi zi calendaristica, la ore apropiate
+    # (in fereastra DBSCAN eps=15 minute), ca sa formeze un singur cluster valid
+    # din perspectiva min_occurrences, dar pe o SINGURA zi distincta
+    base = datetime.now(APP_TIMEZONE).replace(hour=17, minute=52, second=0, microsecond=0)
+    for i in range(6):
+        ts = base + timedelta(minutes=i)  # 17:52, 17:53, ..., 17:57 - aceeasi zi
+        test_db.add(Command(
+            device_id=test_device["id"],
+            user_id=test_user["id"],
+            action="power",
+            value="on",
+            source="app",
+            timestamp=ts,
+        ))
+    test_db.commit()
+
+    resp = test_client.get(
+        "/api/routines/detect?min_occurrences=5&min_distinct_days=2",
+        headers=auth_headers(test_user["token"]),
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Niciun candidat returnat nu trebuie sa provina dintr-o singura zi distincta
+    assert all(c["distinct_days"] >= 2 for c in data["data"])
+
+    # Specific: tiparul din cele 6 comenzi single-day nu trebuie sa apara deloc
+    single_day_candidates = [
+        c for c in data["data"]
+        if c["device_id"] == test_device["id"] and c["action"] == "power" and c["value"] == "on"
+    ]
+    assert single_day_candidates == []
+
+
+def test_recommendations_and_detect_use_same_function(test_client, test_user, test_device):
+    """
+    Verifica unificarea: /api/ml/recommendations si /api/routines/detect trebuie
+    sa returneze exact aceleasi tipare pentru aceiasi parametri (min_occurrences,
+    min_distinct_days), pentru ca folosesc acum aceeasi functie detect_routines().
+    """
+    test_client.post(
+        f"/api/routines/generate-test-data?device_id={test_device['id']}",
+        headers=auth_headers(test_user["token"]),
+    )
+
+    params = "min_occurrences=5&min_distinct_days=2"
+    detect_resp = test_client.get(f"/api/routines/detect?{params}", headers=auth_headers(test_user["token"]))
+    reco_resp = test_client.get(f"/api/ml/recommendations?{params}", headers=auth_headers(test_user["token"]))
+
+    assert detect_resp.status_code == 200
+    assert reco_resp.status_code == 200
+
+    detect_patterns = {
+        (c["device_id"], c["action"], c["value"], c["trigger_time"], c["days_of_week"])
+        for c in detect_resp.json()["data"]
+    }
+    reco_patterns = {
+        (r["device_id"], r["action"], r["value"], r["trigger_time"], r["days_of_week"])
+        for r in reco_resp.json()["recommendations"]
+    }
+
+    assert len(detect_patterns) > 0
+    assert detect_patterns == reco_patterns
+
+
 def test_toggle_routine(test_client, test_user, test_device):
     """
     Verifica ca PUT /api/routines/{id}/toggle schimba campul is_active al rutinei.

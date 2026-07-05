@@ -14,29 +14,35 @@ from models.schemas import (
     RecommendationResponse,
 )
 from services.auth_service import get_current_user
-from services.ml_service import analyze_user_patterns, detect_anomalies
+from services.ml_service import detect_anomalies, detect_routines
+from utils.constants import ML_DAYS_BACK, ML_TIME_EPSILON
 
 router = APIRouter(prefix="/ml", tags=["Machine Learning"])
 
 
 @router.get("/recommendations")
 def get_recommendations(
-    min_occurrences: int = Query(default=5, ge=1, le=50, description="Minimum times a pattern must repeat"),
+    min_occurrences: int | None = Query(default=None, ge=1, le=50, description="Minimum times a pattern must repeat"),
+    min_distinct_days: int | None = Query(default=None, ge=1, le=30, description="Minimum distinct calendar days"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Return DBSCAN-based routine recommendations for the authenticated user.
+    Return routine-pattern recommendations for the authenticated user.
 
-    Analyzes commands from the last 30 days and groups them by (device, action).
-    Each recommendation represents a detected time-of-day pattern.
+    Uses the SAME detect_routines() function (and thus the same DBSCAN clustering
+    and min_occurrences/min_distinct_days filters) as GET /api/routines/detect, so
+    the dashboard and the "Select Routines to Create" dialog always show identical
+    candidates for identical parameter values.
 
     Query params:
-        min_occurrences: minimum cluster size (defaults to user's saved ML setting).
+        min_occurrences:   minimum cluster size (defaults to the user's saved ML setting, or 5).
+        min_distinct_days: minimum distinct calendar days a pattern must span (defaults to
+                            the user's saved ML setting, or 2). Filters out single-day bursts.
     """
-    # Use user's saved setting when the caller does not override it
-    effective_min = min_occurrences if min_occurrences != 5 else (current_user.ml_min_occurrences or 5)
-    effective_days = current_user.ml_min_days or 4
+    # Use the user's saved Settings-screen sliders when the caller does not override them
+    effective_min = min_occurrences if min_occurrences is not None else (current_user.ml_min_occurrences or 5)
+    effective_days = min_distinct_days if min_distinct_days is not None else (current_user.ml_min_days or 2)
 
     from datetime import timedelta, timezone
     from datetime import datetime
@@ -50,11 +56,18 @@ def get_recommendations(
         .count()
     )
 
-    recommendations = analyze_user_patterns(current_user.id, db, effective_min, effective_days)
+    recommendations = detect_routines(
+        db,
+        current_user.id,
+        days_back=ML_DAYS_BACK,
+        min_occurrences=effective_min,
+        min_distinct_days=effective_days,
+        time_epsilon_minutes=ML_TIME_EPSILON,
+    )
 
     return {
         "recommendations": recommendations,
-        "analyzed_days": 30,
+        "analyzed_days": ML_DAYS_BACK,
         "total_commands": total_commands,
     }
 
