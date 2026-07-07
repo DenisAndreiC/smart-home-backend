@@ -44,10 +44,15 @@ from services.email_service import send_email
 # Custom exceptions for duplicate account data
 from utils.exceptions import DuplicateEmailException, DuplicateUsernameException
 
+# Global app settings (contine base_url public, citit din .env)
+from config import settings
+
 router = APIRouter(prefix="/auth", tags=["Autentificare"])
 
-# Base URL used in email links — points to the backend API
-_BASE_URL = "http://192.168.100.184:8000/api/auth"
+# Base URL used in email links — points to the backend API.
+# Trebuie sa fie adresa publica (ex: IP-ul serverului Hetzner), nu una locala,
+# altfel linkurile din email nu sunt accesibile in afara retelei locale.
+_BASE_URL = f"{settings.base_url}/api/auth"
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

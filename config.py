@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Durata de viata a token-ului JWT in minute (1440 = 24 ore)
     jwt_expiration_minutes: int
 
+    # URL-ul public al backend-ului, folosit in linkurile din email-uri
+    # (verify-email, reset-password). Trebuie sa fie adresa/domeniul accesibil
+    # din afara retelei locale (ex: IP-ul public de pe Hetzner), nu un IP local.
+    base_url: str = "http://localhost:8000"
+
     # Spune pydantic-settings sa citeasca valorile din fisierul .env
     model_config = {"env_file": ".env"}
 
