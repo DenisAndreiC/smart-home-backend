@@ -15,18 +15,12 @@ services:
       - "8000:8000"
     depends_on:
       - mosquitto
+    env_file:
+      - .env
     environment:
       MQTT_BROKER: mosquitto
       MQTT_PORT: 1883
-      DATABASE_URL: sqlite:///./smart_home.db
-      JWT_SECRET: smarthome_secret_key_2025_licenta
-      JWT_ALGORITHM: HS256
-      JWT_EXPIRATION_MINUTES: 1440
-      SMTP_HOST: smtp.gmail.com
-      SMTP_PORT: 587
-      SMTP_USER: smarthomebydenis@gmail.com
-      SMTP_PASSWORD: yesqsvhntgnxcpxq
-      SMTP_FROM: smarthomebydenis@gmail.com
     volumes:
-      - ./smart_home.db:/app/smart_home.db
+      - ./data:/app/data
+      - ./static:/app/static
     restart: unless-stopped
